@@ -184,10 +184,12 @@ The contracts live in a Cargo workspace under [`onchain/`](onchain/) and use **s
 | `join_round(caller, round_id)` | caller | Joins a round that hasn't started (no duplicate joins). Emits `RoundJoined` |
 | `start_round(caller, round_id)` | participant | Marks the caller ready (emits `PlayerReady`). When all players are ready, the round starts (emits `RoundStarted`) |
 | `next_card(round_id) → Card` | — | Draws the next card of a started round. Marks the round completed after the last draw |
-| `submit_answer(caller, round_id, answer) → bool` | participant | Checks the answer against the current card and updates the caller's streaks |
+| `submit_answer(caller, round_id, answer) → bool` | participant | Checks the answer against the current card, records the answer time, and updates the caller's streaks and score |
+| `finalize_round(caller, round_id)` | participant | Finalizes the round once it is complete or past its deadline, updates winner stats, and emits `RoundCompleted` |
 | `build_question_card(card, seed) → QuestionCard` | — | Picks 3 distinct wrong titles and shuffles them with the right one |
 | **Views** | | |
 | `get_round`, `get_round_cards`, `get_round_players`, `get_players_round_count` | — | Round info |
+| `get_round_scores(round_id)` | — | Final per-player correct-answer counts for the round |
 | `get_card`, `get_cards_per_round` | — | Card info and configuration |
 | `get_cards_of_genre / _of_artist / _of_a_year(…, seed)` | — | `cards_per_round` random cards from an index |
 | `get_player_stat(player)` | — | `PlayerStats` (zeros if the player is unknown) |
@@ -221,6 +223,7 @@ The SDK surfaces these as `Error(Contract, #<code>)`.
 | `RoundJoined` | `round_id`, `player` | `joined_time` |
 | `PlayerReady` | `round_id`, `player` | `ready_time` |
 | `RoundStarted` | `round_id`, `admin` | `start_time` |
+| `RoundCompleted` | `round_id` | `winners`, `scores` |
 
 ### `lyricsflip-nft` — reward NFT contract
 
