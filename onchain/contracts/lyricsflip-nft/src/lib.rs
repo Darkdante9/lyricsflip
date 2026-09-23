@@ -49,6 +49,27 @@ enum DataKey {
     TokenOwner(u128),
 }
 
+// ---------------------------------------------------------------------------
+// LF-012 – TTL policy (mirrors lyricsflip game contract)
+// ---------------------------------------------------------------------------
+pub const DAY_IN_LEDGERS: u32 = 17_280;
+pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS;
+pub const LIFETIME_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS;
+
+#[inline]
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+#[inline]
+fn bump_persistent<K: soroban_sdk::TryIntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
 #[contract]
 pub struct LyricsFlipNFT;
 
@@ -75,6 +96,7 @@ impl LyricsFlipNFT {
             .set(&DataKey::TokenSymbol, &token_symbol);
         env.storage().instance().set(&DataKey::BaseUri, &base_uri);
         env.storage().instance().set(&DataKey::TokenCount, &0u128);
+        bump_instance(&env);
     }
 
     pub fn mint(env: Env, caller: Address, recipient: Address) -> u128 {
@@ -103,9 +125,12 @@ impl LyricsFlipNFT {
         env.storage()
             .persistent()
             .set(&DataKey::TokenOwner(token_id), &recipient);
+        bump_persistent(&env, &DataKey::TokenOwner(token_id));
+
         env.storage()
             .instance()
             .set(&DataKey::TokenCount, &token_id);
+        bump_instance(&env);
 
         NftMinted {
             token_id,
@@ -117,25 +142,32 @@ impl LyricsFlipNFT {
     }
 
     pub fn owner_of(env: Env, token_id: u128) -> Address {
-        env.storage()
+        let owner: Address = env
+            .storage()
             .persistent()
             .get(&DataKey::TokenOwner(token_id))
-            .unwrap_or_else(|| panic_with_error!(env, Error::TokenDoesNotExist))
+            .unwrap_or_else(|| panic_with_error!(env, Error::TokenDoesNotExist));
+        bump_persistent(&env, &DataKey::TokenOwner(token_id));
+        owner
     }
 
     pub fn token_name(env: Env) -> String {
+        bump_instance(&env);
         env.storage().instance().get(&DataKey::TokenName).unwrap()
     }
 
     pub fn token_symbol(env: Env) -> String {
+        bump_instance(&env);
         env.storage().instance().get(&DataKey::TokenSymbol).unwrap()
     }
 
     pub fn base_uri(env: Env) -> String {
+        bump_instance(&env);
         env.storage().instance().get(&DataKey::BaseUri).unwrap()
     }
 
     pub fn token_count(env: Env) -> u128 {
+        bump_instance(&env);
         env.storage()
             .instance()
             .get(&DataKey::TokenCount)
