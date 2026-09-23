@@ -3,7 +3,7 @@
 //! id increments, ownership lookups). Not `cargo test`-verified in this
 //! environment (no Rust toolchain available).
 
-use crate::{LyricsFlipNFT, LyricsFlipNFTClient};
+use crate::{Error, LyricsFlipNFT, LyricsFlipNFTClient};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
 fn setup<'a>() -> (Env, LyricsFlipNFTClient<'a>, Address, Address) {
@@ -64,4 +64,20 @@ fn owner_of_unminted_token_fails() {
     let (_env, client, _owner, _minter) = setup();
     let result = client.try_owner_of(&999u128);
     assert!(result.is_err());
+}
+
+/// Clients map on these numeric codes; renumbering any of them is a breaking
+/// change. Update `onchain/README.md` and `frontend/src/lib/stellar/errors.ts`
+/// together with this test.
+#[test]
+fn error_codes_are_stable() {
+    let expected = [
+        (Error::AlreadyInitialized, 1),
+        (Error::NotMinter, 2),
+        (Error::TokenAlreadyExists, 3),
+        (Error::TokenDoesNotExist, 4),
+    ];
+    for (variant, code) in expected {
+        assert_eq!(variant as u32, code, "{:?} was renumbered", variant);
+    }
 }

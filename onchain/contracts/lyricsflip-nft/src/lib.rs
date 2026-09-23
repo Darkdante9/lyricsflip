@@ -21,12 +21,18 @@ pub struct NftMinted {
 /// one, and no `SRC5`-style interface introspection, so this keeps only the
 /// surface the original contract actually used: minter-gated `mint`, a
 /// monotonically increasing token id, and per-token ownership.
+///
+/// Clients map on the numeric values, so never renumber or reuse a code; keep
+/// `onchain/README.md` and `test::error_codes_are_stable` in sync.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
 pub enum Error {
+    /// Defensive only: `__constructor` runs exactly once per deployment.
     AlreadyInitialized = 1,
     NotMinter = 2,
+    /// Defensive only: token ids come from a monotonic counter, so a
+    /// collision should never happen.
     TokenAlreadyExists = 3,
     TokenDoesNotExist = 4,
 }

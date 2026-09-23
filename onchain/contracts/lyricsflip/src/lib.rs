@@ -17,6 +17,10 @@ use soroban_sdk::{
 
 const DEFAULT_ROUND_DURATION_SECONDS: u64 = 300;
 
+/// Upper bound on the page size of the paginated list views (`get_rounds`,
+/// `get_open_rounds`). Larger `limit` values are clamped to this.
+pub const MAX_PAGE_LIMIT: u32 = 50;
+
 #[contract]
 pub struct LyricsFlip;
 
@@ -115,6 +119,56 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundFinalized(round_id), &true);
+    pub fn get_cards_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::CardsCount)
+            .unwrap_or(0)
+    }
+
+    pub fn get_round_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::RoundCount)
+            .unwrap_or(0)
+    }
+
+    pub fn get_genre_card_count(env: Env, genre: Genre) -> u32 {
+        env.storage()
+            .persistent()
+            .get::<_, Vec<u64>>(&DataKey::GenreCards(genre))
+            .map(|ids| ids.len())
+            .unwrap_or(0)
+    }
+
+    /// Returns up to `limit` rounds (clamped to `MAX_PAGE_LIMIT`) starting at
+    /// round id `start`, in ascending id order. Round ids begin at 1, so a
+    /// `start` of 0 is treated as 1. Returns an empty list past the end.
+    pub fn get_rounds(env: Env, start: u64, limit: u32) -> Vec<Round> {
+        let round_count = Self::get_round_count(env.clone());
+        let limit = limit.min(MAX_PAGE_LIMIT) as u64;
+        let mut rounds: Vec<Round> = Vec::new(&env);
+
+        let mut round_id = start.max(1);
+        while round_id <= round_count && (rounds.len() as u64) < limit {
+            rounds.push_back(Self::read_round(&env, round_id));
+            round_id += 1;
+        }
+        rounds
+    }
+
+    /// Ids of rounds that are created but not yet started (i.e. joinable),
+    /// oldest first. `start` is an offset into that list and `limit` is
+    /// clamped to `MAX_PAGE_LIMIT`.
+    pub fn get_open_rounds(env: Env, start: u32, limit: u32) -> Vec<u64> {
+        let open = Self::read_open_rounds(&env);
+        let end = start
+            .saturating_add(limit.min(MAX_PAGE_LIMIT))
+            .min(open.len());
+        if start >= end {
+            return Vec::new(&env);
+        }
+        open.slice(start..end)
     }
 
     pub fn get_cards_per_round(env: Env) -> u32 {
@@ -260,6 +314,10 @@ impl LyricsFlip {
             .persistent()
             .set(&DataKey::Round(round_id), &round);
 
+        let mut open = Self::read_open_rounds(&env);
+        open.push_back(round_id);
+        env.storage().persistent().set(&DataKey::OpenRounds, &open);
+
         RoundCreated {
             round_id,
             admin: caller,
@@ -287,13 +345,6 @@ impl LyricsFlip {
         }
 
         let players = Self::read_round_players(&env, round_id);
-        for player in players.iter() {
-            let mut stats = Self::get_player_stat(env.clone(), player.clone());
-            stats.total_rounds += 1;
-            env.storage()
-                .persistent()
-                .set(&DataKey::PlayerStats(player), &stats);
-        }
 
         env.storage().persistent().set(&ready_key, &true);
 
@@ -315,7 +366,19 @@ impl LyricsFlip {
         }
         .publish(&env);
 
+        // Increment total_rounds only when the round actually starts (all
+        // players ready). Individual ready calls must not inflate the count,
+        // and a round that never reaches ready_count == players.len() must
+        // not change it.
         if ready_count == players.len() {
+            for player in players.iter() {
+                let mut stats = Self::get_player_stat(env.clone(), player.clone());
+                stats.total_rounds += 1;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::PlayerStats(player), &stats);
+            }
+
             let start_time = env.ledger().timestamp();
             round.start_time = start_time;
             round.end_time = start_time + DEFAULT_ROUND_DURATION_SECONDS;
@@ -323,6 +386,12 @@ impl LyricsFlip {
             env.storage()
                 .persistent()
                 .set(&DataKey::Round(round_id), &round);
+
+            let mut open = Self::read_open_rounds(&env);
+            if let Some(idx) = open.first_index_of(round_id) {
+                open.remove(idx);
+                env.storage().persistent().set(&DataKey::OpenRounds, &open);
+            }
 
             RoundStarted {
                 round_id,
@@ -700,6 +769,11 @@ impl LyricsFlip {
             winners = Vec::new(env);
         }
         winners
+    fn read_open_rounds(env: &Env) -> Vec<u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::OpenRounds)
+            .unwrap_or(Vec::new(env))
     }
 
     fn is_round_player(env: &Env, round_id: u64, player: &Address) -> bool {

@@ -122,4 +122,7 @@ pub enum DataKey {
     PlayerStats(Address),
     RoundReady((u64, Address)),
     RoundReadyCount(u64),
+    /// Ids of rounds that have been created but not yet started, in creation
+    /// order. Backs the multiplayer lobby's `get_open_rounds` view.
+    OpenRounds,
 }

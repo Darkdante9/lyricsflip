@@ -71,3 +71,58 @@ stellar contract deploy \
 Put the resulting contract IDs into the frontend's
 `NEXT_PUBLIC_LYRICSFLIP_CONTRACT_ID` / `NEXT_PUBLIC_LYRICSFLIP_NFT_CONTRACT_ID`
 environment variables (see `frontend/src/lib/stellar/stellarConfig.ts`).
+
+## Views for lobbies and catalogue size
+
+| Function | Returns |
+| --- | --- |
+| `get_cards_count()` | Total number of cards added (`u64`) |
+| `get_round_count()` | Total number of rounds created (`u64`) |
+| `get_genre_card_count(genre)` | Number of cards in `genre` (`u32`) |
+| `get_rounds(start, limit)` | Up to `limit` rounds from round id `start` (ids begin at 1), ascending |
+| `get_open_rounds(start, limit)` | Ids of created-but-not-started rounds, oldest first; `start` is an offset |
+
+Both paginated views clamp `limit` to `MAX_PAGE_LIMIT` (50) and return an
+empty list once `start` is past the end.
+
+## Error codes
+
+Contract errors reach clients as `Error(Contract, #<code>)`, and the frontend
+maps on the numeric code (`frontend/src/lib/stellar/errors.ts`). **Codes are
+stable: never renumber or reuse one.** New variants take the next free number
+and must be added here, in `errors.ts`, and in the `error_codes_are_stable`
+test of the contract, which fails CI on any renumbering.
+
+Every variant is currently referenced by the contract. The ones marked
+*defensive* guard states that can't happen in practice.
+
+### `lyricsflip`
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 1 | `AlreadyInitialized` | Constructor ran on an already-initialized contract (*defensive*) |
+| 2 | `NonExistingRound` | No round with the given id |
+| 3 | `RoundAlreadyStarted` | Tried to join a round that has already started |
+| 4 | `NonExistingGenre` | `create_round` was called without a genre |
+| 5 | `RoundAlreadyJoined` | Caller is already a player in the round |
+| 6 | `InvalidCardsPerRound` | `set_cards_per_round` was called with 0 |
+| 7 | `ArtistCardsIsZero` | No cards exist for the requested artist |
+| 8 | `EmptyYearCards` | No cards exist for the requested year |
+| 9 | `EmptyGenreCards` | No cards exist for the requested genre |
+| 10 | `RoundNotStarted` | Action requires a started round |
+| 11 | `RoundCompleted` | Round has no cards left / is already finished |
+| 12 | `NotAParticipant` | Caller is not a player in the round |
+| 13 | `AlreadyReady` | Caller already signalled ready for the round |
+| 14 | `NotAuthorized` | Caller lacks the required owner/admin/round role |
+| 15 | `AmountExceedsLimit` | Asked for more random cards than exist (e.g. cards-per-round larger than the catalogue) |
+| 16 | `LimitMustBeGreaterThanZero` | Random selection over an empty set (no cards added yet) |
+| 17 | `NonExistingCard` | No card with the given id |
+
+### `lyricsflip-nft`
+
+| Code | Name | Meaning |
+| --- | --- | --- |
+| 1 | `AlreadyInitialized` | Constructor ran on an already-initialized contract (*defensive*) |
+| 2 | `NotMinter` | Caller of `mint` is not the configured minter |
+| 3 | `TokenAlreadyExists` | Token id collision on mint (*defensive*) |
+| 4 | `TokenDoesNotExist` | `owner_of` was called for an unminted token |
