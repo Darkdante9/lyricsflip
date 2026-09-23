@@ -216,13 +216,6 @@ impl LyricsFlip {
         }
 
         let players = Self::read_round_players(&env, round_id);
-        for player in players.iter() {
-            let mut stats = Self::get_player_stat(env.clone(), player.clone());
-            stats.total_rounds += 1;
-            env.storage()
-                .persistent()
-                .set(&DataKey::PlayerStats(player), &stats);
-        }
 
         env.storage().persistent().set(&ready_key, &true);
 
@@ -244,7 +237,19 @@ impl LyricsFlip {
         }
         .publish(&env);
 
+        // Increment total_rounds only when the round actually starts (all
+        // players ready). Individual ready calls must not inflate the count,
+        // and a round that never reaches ready_count == players.len() must
+        // not change it.
         if ready_count == players.len() {
+            for player in players.iter() {
+                let mut stats = Self::get_player_stat(env.clone(), player.clone());
+                stats.total_rounds += 1;
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::PlayerStats(player), &stats);
+            }
+
             let start_time = env.ledger().timestamp();
             round.start_time = start_time;
             round.is_started = true;
