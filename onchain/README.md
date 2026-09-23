@@ -17,6 +17,26 @@ contracts:
   ```
 - [Stellar CLI](https://developers.stellar.org/docs/tools/stellar-cli) (`stellar`) for deploying and invoking contracts, if you don't already have it.
 
+## Round scoring and finalization
+
+Each player's round score is the number of correct answers they submitted in that round. The contract also tracks the total time spent answering in that round so tie-breaks can be resolved fairly. `get_round_scores(round_id)` returns the final per-player score map for the round.
+
+A round can be finalized when either:
+
+- every required player/card answer in the round has been submitted, or
+- the round deadline has passed (`round.end_time`)
+
+`finalize_round(round_id)` is callable by any round participant and rejects early or duplicate finalization attempts. Once a round has been finalized, it cannot be finalized again; the second call fails and does not change `rounds_won` or emit another `RoundCompleted` event.
+
+Winner selection follows the LF-005 rule:
+
+- highest correct-answer count wins
+- when several players are tied on score, the lowest total answer time wins
+- if the score and total answer time are both tied, the tied players are co-winners
+- if every player has a score of `0`, there are no winners
+
+`PlayerStats.rounds_won` increments by exactly `1` for every winner when a round is finalized; non-winners and zero-score rounds do not change it. `RoundCompleted { round_id, winners, scores }` emits the finalized round id, the winning addresses, and the final score map for every player in the round.
+
 ## Build & test
 
 ```bash

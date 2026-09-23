@@ -8,10 +8,14 @@ mod types;
 mod test;
 
 pub use errors::Error;
-pub use events::{PlayerReady, RoundCreated, RoundJoined, RoundStarted};
+pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
 pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, Role, Round};
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Bytes, Env, String, Vec};
+use soroban_sdk::{
+    contract, contractimpl, panic_with_error, Address, Bytes, Env, Map, String, Vec,
+};
+
+const DEFAULT_ROUND_DURATION_SECONDS: u64 = 300;
 
 /// Upper bound on the page size of the paginated list views (`get_rounds`,
 /// `get_open_rounds`). Larger `limit` values are clamped to this.
@@ -50,6 +54,71 @@ impl LyricsFlip {
         Self::read_round_players(&env, round_id).len()
     }
 
+    pub fn get_round_scores(env: Env, round_id: u64) -> Map<Address, u64> {
+        let players = Self::read_round_players(&env, round_id);
+        let mut scores = Self::read_round_scores(&env, round_id);
+
+        for player in players.iter() {
+            if scores.get(player.clone()).is_none() {
+                scores.set(player.clone(), 0u64);
+            }
+        }
+
+        scores
+    }
+
+    pub fn finalize_round(env: Env, caller: Address, round_id: u64) {
+        caller.require_auth();
+        let round = Self::read_round(&env, round_id);
+        if !Self::is_round_player(&env, round_id, &caller) {
+            panic_with_error!(env, Error::NotAParticipant);
+        }
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoundFinalized(round_id))
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, Error::RoundAlreadyFinalized);
+        }
+
+        let is_all_cards_answered = Self::are_all_required_answers_submitted(&env, round_id);
+        let is_past_deadline = round.end_time != 0 && env.ledger().timestamp() >= round.end_time;
+        if !is_all_cards_answered && !is_past_deadline {
+            panic_with_error!(env, Error::RoundNotReady);
+        }
+
+        let winners = Self::determine_round_winners(&env, round_id);
+        if winners.len() > 0 {
+            for player in Self::read_round_players(&env, round_id).iter() {
+                let mut is_winner = false;
+                for winner in winners.iter() {
+                    if winner == player {
+                        is_winner = true;
+                        break;
+                    }
+                }
+                if is_winner {
+                    let mut stats = Self::get_player_stat(env.clone(), player.clone());
+                    stats.rounds_won += 1;
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::PlayerStats(player), &stats);
+                }
+            }
+        }
+
+        let scores = Self::get_round_scores(env.clone(), round_id);
+        RoundCompleted {
+            round_id,
+            winners: winners.clone(),
+            scores,
+        }
+        .publish(&env);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoundFinalized(round_id), &true);
     pub fn get_cards_count(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -312,6 +381,7 @@ impl LyricsFlip {
 
             let start_time = env.ledger().timestamp();
             round.start_time = start_time;
+            round.end_time = start_time + DEFAULT_ROUND_DURATION_SECONDS;
             round.is_started = true;
             env.storage()
                 .persistent()
@@ -371,6 +441,10 @@ impl LyricsFlip {
             .get(round.next_card_index)
             .unwrap_or_else(|| panic_with_error!(env, Error::RoundCompleted));
         let card = Self::get_card(env.clone(), card_id);
+        env.storage().persistent().set(
+            &DataKey::RoundCardStartedAt((round_id, card_id)),
+            &env.ledger().timestamp(),
+        );
 
         round.next_card_index += 1;
         if round.next_card_index >= round_cards.len() {
@@ -473,11 +547,46 @@ impl LyricsFlip {
         let current_card_id = round_cards.get(current_index).unwrap();
         let current_card = Self::get_card(env.clone(), current_card_id);
 
+        let answered_key =
+            DataKey::RoundPlayerAnswered((round_id, caller.clone(), current_card_id));
+        if env
+            .storage()
+            .persistent()
+            .get(&answered_key)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        env.storage().persistent().set(&answered_key, &true);
+
+        let answer_started_at: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoundCardStartedAt((round_id, current_card_id)))
+            .unwrap_or(round.start_time);
+        let answer_time = env.ledger().timestamp().saturating_sub(answer_started_at);
+        let answer_times = Self::read_round_answer_times(&env, round_id);
+        let mut answer_times = answer_times;
+        let total_time = answer_times.get(caller.clone()).unwrap_or(0u64);
+        answer_times.set(caller.clone(), total_time + answer_time);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RoundAnswerTimes(round_id), &answer_times);
+
         let is_answer_correct = match answer {
             Answer::Artist(value) => value == current_card.artist,
             Answer::Year(value) => value == current_card.year,
             Answer::Title(value) => value == current_card.title,
         };
+
+        let mut scores = Self::read_round_scores(&env, round_id);
+        if is_answer_correct {
+            let score = scores.get(caller.clone()).unwrap_or(0u64);
+            scores.set(caller.clone(), score + 1);
+            env.storage()
+                .persistent()
+                .set(&DataKey::RoundScores(round_id), &scores);
+        }
 
         let mut stats = Self::get_player_stat(env.clone(), caller.clone());
         if is_answer_correct {
@@ -570,6 +679,96 @@ impl LyricsFlip {
             .unwrap_or(Vec::new(env))
     }
 
+    fn read_round_scores(env: &Env, round_id: u64) -> Map<Address, u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoundScores(round_id))
+            .unwrap_or(Map::new(env))
+    }
+
+    fn read_round_answer_times(env: &Env, round_id: u64) -> Map<Address, u64> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RoundAnswerTimes(round_id))
+            .unwrap_or(Map::new(env))
+    }
+
+    fn are_all_required_answers_submitted(env: &Env, round_id: u64) -> bool {
+        let players = Self::read_round_players(env, round_id);
+        let round_cards = Self::read_round_cards(env, round_id);
+        if players.is_empty() || round_cards.is_empty() {
+            return false;
+        }
+
+        for player in players.iter() {
+            for card_id in round_cards.iter() {
+                let answered: bool = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::RoundPlayerAnswered((
+                        round_id,
+                        player.clone(),
+                        card_id,
+                    )))
+                    .unwrap_or(false);
+                if !answered {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn determine_round_winners(env: &Env, round_id: u64) -> Vec<Address> {
+        let players = Self::read_round_players(env, round_id);
+        let scores = Self::read_round_scores(env, round_id);
+        let answer_times = Self::read_round_answer_times(env, round_id);
+
+        let mut winners: Vec<Address> = Vec::new(env);
+        let mut max_score: u64 = 0;
+        let mut best_time: Option<u64> = None;
+
+        for player in players.iter() {
+            let score = scores.get(player.clone()).unwrap_or(0u64);
+            if score == 0 && max_score == 0 && winners.len() == 0 {
+                continue;
+            }
+
+            if score > max_score {
+                max_score = score;
+                winners = Vec::new(env);
+                winners.push_back(player.clone());
+                best_time = Some(answer_times.get(player.clone()).unwrap_or(0u64));
+                continue;
+            }
+
+            if score != max_score {
+                continue;
+            }
+
+            let time = answer_times.get(player.clone()).unwrap_or(0u64);
+            match best_time {
+                Some(current_best) => {
+                    if time < current_best {
+                        winners = Vec::new(env);
+                        winners.push_back(player.clone());
+                        best_time = Some(time);
+                    } else if time == current_best {
+                        winners.push_back(player.clone());
+                    }
+                }
+                None => {
+                    winners.push_back(player.clone());
+                    best_time = Some(time);
+                }
+            }
+        }
+
+        if max_score == 0 {
+            winners = Vec::new(env);
+        }
+        winners
     fn read_open_rounds(env: &Env) -> Vec<u64> {
         env.storage()
             .persistent()

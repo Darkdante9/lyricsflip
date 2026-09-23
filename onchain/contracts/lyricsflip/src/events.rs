@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, Address};
+use soroban_sdk::{contractevent, Address, Map, Vec};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -38,4 +38,13 @@ pub struct PlayerReady {
     #[topic]
     pub player: Address,
     pub ready_time: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoundCompleted {
+    #[topic]
+    pub round_id: u64,
+    pub winners: Vec<Address>,
+    pub scores: Map<Address, u64>,
 }

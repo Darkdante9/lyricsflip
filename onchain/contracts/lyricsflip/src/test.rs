@@ -5,6 +5,11 @@
 //! this environment (no Rust toolchain available) — run `cargo test` inside
 //! `onchain/` before relying on them.
 
+use crate::{Answer, Card, Genre, LyricsFlip, LyricsFlipClient, Role};
+use soroban_sdk::{
+    testutils::{Address as _, Events},
+    xdr, Address, Env, Map, String,
+};
 use crate::{Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, Role, MAX_PAGE_LIMIT};
 use soroban_sdk::{testutils::Address as _, Address, Env, String};
 
@@ -232,6 +237,262 @@ fn set_role_is_owner_gated_and_updates_is_admin() {
     assert!(result.is_err(), "only the owner may grant/revoke admin");
 }
 
+fn assert_round_completed_event(
+    env: &Env,
+    contract_id: &Address,
+    round_id: u64,
+    winners: &soroban_sdk::Vec<Address>,
+    scores: &Map<Address, u64>,
+) {
+    let expected_round_id = xdr::ScVal::try_from_val(env, &round_id).unwrap();
+    let expected_data = soroban_sdk::vec![
+        env,
+        winners.clone().into_val(env),
+        scores.clone().into_val(env)
+    ];
+    let expected_data_xdr = xdr::ScVal::try_from_val(env, &expected_data).unwrap();
+
+    let events = env.events().all().filter_by_contract(contract_id);
+    let mut found = false;
+    for event in events.events().iter() {
+        let body = match &event.body {
+            xdr::ContractEventBody::V0(body) => body,
+            _ => continue,
+        };
+        if body.topics.len() != 1 {
+            continue;
+        }
+        if body.topics[0] != expected_round_id {
+            continue;
+        }
+        if body.data == expected_data_xdr {
+            found = true;
+            break;
+        }
+    }
+
+    assert!(
+        found,
+        "expected RoundCompleted event to include the winning scores and round id"
+    );
+}
+
+#[test]
+fn finalize_round_e2e_single_winner_updates_stats_and_scores() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &2);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &42u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let first_card = client.next_card(&round_id);
+    env.ledger().set_timestamp(100);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(first_card.title.clone())));
+    env.ledger().set_timestamp(130);
+    assert!(!client.submit_answer(
+        &player2,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "wrong-a"))
+    ));
+
+    let second_card = client.next_card(&round_id);
+    env.ledger().set_timestamp(200);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(second_card.title.clone())));
+    env.ledger().set_timestamp(240);
+    assert!(!client.submit_answer(
+        &player2,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "wrong-b"))
+    ));
+
+    let scores = client.get_round_scores(&round_id);
+    assert_eq!(scores.get(owner.clone()).unwrap(), 2u64);
+    assert_eq!(scores.get(player2.clone()).unwrap(), 0u64);
+
+    client.finalize_round(&owner, &round_id);
+
+    let owner_stats = client.get_player_stat(&owner);
+    assert_eq!(owner_stats.rounds_won, 1);
+    assert_eq!(client.get_player_stat(&player2).rounds_won, 0);
+
+    let winners = soroban_sdk::vec![&env, owner.clone()];
+    assert_round_completed_event(&env, &client.address, round_id, &winners, &scores);
+
+    let event_count_before_second_finalize = env
+        .events()
+        .all()
+        .filter_by_contract(&client.address)
+        .events()
+        .len();
+    let second_attempt = client.try_finalize_round(&owner, &round_id);
+    assert!(second_attempt.is_err());
+    let event_count_after_second_finalize = env
+        .events()
+        .all()
+        .filter_by_contract(&client.address)
+        .events()
+        .len();
+    assert_eq!(
+        event_count_after_second_finalize,
+        event_count_before_second_finalize
+    );
+}
+
+#[test]
+fn finalize_round_e2e_deadline_path_works_without_all_answers() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &2);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &99u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(50);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(card.title.clone())));
+    env.ledger().set_timestamp(70);
+    assert!(!client.submit_answer(
+        &player2,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "not-the-answer"))
+    ));
+
+    let round = client.get_round(&round_id);
+    env.ledger().set_timestamp(round.end_time + 1);
+
+    client.finalize_round(&owner, &round_id);
+
+    let stats = client.get_player_stat(&owner);
+    assert_eq!(stats.rounds_won, 1);
+    let winners = soroban_sdk::vec![&env, owner.clone()];
+    assert_round_completed_event(
+        &env,
+        &client.address,
+        round_id,
+        &winners,
+        &client.get_round_scores(&round_id),
+    );
+}
+
+#[test]
+fn finalize_round_e2e_tie_breaks_by_total_answer_time() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &3u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(100);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(card.title.clone())));
+    env.ledger().set_timestamp(130);
+    assert!(client.submit_answer(&player2, &round_id, &Answer::Title(card.title.clone())));
+
+    client.finalize_round(&owner, &round_id);
+
+    assert_eq!(client.get_player_stat(&owner).rounds_won, 1);
+    assert_eq!(client.get_player_stat(&player2).rounds_won, 0);
+}
+
+#[test]
+fn finalize_round_e2e_exact_score_and_time_tie_produces_co_winners() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &11u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(100);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(card.title.clone())));
+    assert!(client.submit_answer(&player2, &round_id, &Answer::Title(card.title.clone())));
+
+    client.finalize_round(&owner, &round_id);
+
+    assert_eq!(client.get_player_stat(&owner).rounds_won, 1);
+    assert_eq!(client.get_player_stat(&player2).rounds_won, 1);
+
+    let winners = soroban_sdk::vec![&env, owner.clone(), player2.clone()];
+    let scores = client.get_round_scores(&round_id);
+    assert_round_completed_event(&env, &client.address, round_id, &winners, &scores);
+}
+
+#[test]
+fn finalize_round_rejects_early_and_non_participant() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &17u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(100);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(card.title.clone())));
+
+    let err = client.try_finalize_round(&owner, &round_id);
+    assert!(err.is_err());
+
+    let outsider = Address::generate(&env);
+    let outsider_err = client.try_finalize_round(&outsider, &round_id);
+    assert!(outsider_err.is_err());
+}
+
+#[test]
+fn finalize_round_e2e_no_correct_answers_has_no_winners() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &17u64);
+    let player2 = Address::generate(&env);
+    client.join_round(&player2, &round_id);
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(100);
+    assert!(!client.submit_answer(
+        &owner,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "wrong"))
+    ));
+    env.ledger().set_timestamp(150);
+    assert!(!client.submit_answer(
+        &player2,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "wrong-two"))
+    ));
+
+    client.finalize_round(&owner, &round_id);
+
+    assert_eq!(client.get_player_stat(&owner).rounds_won, 0);
+    assert_eq!(client.get_player_stat(&player2).rounds_won, 0);
+
+    let scores = client.get_round_scores(&round_id);
+    assert_eq!(scores.get(owner.clone()).unwrap(), 0u64);
+    assert_eq!(scores.get(player2.clone()).unwrap(), 0u64);
+
+    let winners = soroban_sdk::vec![&env];
+    assert_round_completed_event(&env, &client.address, round_id, &winners, &scores);
 #[test]
 fn card_counts_track_adds() {
     let (env, client, owner) = setup();

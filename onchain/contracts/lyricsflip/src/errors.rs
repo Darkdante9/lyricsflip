@@ -27,5 +27,7 @@ pub enum Error {
     NotAuthorized = 14,
     AmountExceedsLimit = 15,
     LimitMustBeGreaterThanZero = 16,
+    RoundNotReady = 18,
+    RoundAlreadyFinalized = 19,
     NonExistingCard = 17,
 }
