@@ -96,6 +96,57 @@ fn round_requires_all_players_ready_before_starting() {
 }
 
 #[test]
+fn total_rounds_increments_once_per_player_when_three_player_round_starts() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+
+    let player2 = Address::generate(&env);
+    let player3 = Address::generate(&env);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &42u64);
+    client.join_round(&player2, &round_id);
+    client.join_round(&player3, &round_id);
+
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+    client.start_round(&player3, &round_id);
+
+    let round = client.get_round(&round_id);
+    assert!(round.is_started, "round should start once all players are ready");
+
+    assert_eq!(client.get_player_stat(&owner).total_rounds, 1);
+    assert_eq!(client.get_player_stat(&player2).total_rounds, 1);
+    assert_eq!(client.get_player_stat(&player3).total_rounds, 1);
+}
+
+#[test]
+fn total_rounds_unchanged_when_round_never_fully_starts() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+
+    let player2 = Address::generate(&env);
+    let player3 = Address::generate(&env);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &42u64);
+    client.join_round(&player2, &round_id);
+    client.join_round(&player3, &round_id);
+
+    // Only some players mark ready; the round never reaches full ready count.
+    client.start_round(&owner, &round_id);
+    client.start_round(&player2, &round_id);
+
+    let round = client.get_round(&round_id);
+    assert!(
+        !round.is_started,
+        "round should not start until every player is ready"
+    );
+
+    assert_eq!(client.get_player_stat(&owner).total_rounds, 0);
+    assert_eq!(client.get_player_stat(&player2).total_rounds, 0);
+    assert_eq!(client.get_player_stat(&player3).total_rounds, 0);
+}
+
+#[test]
 fn join_round_rejects_duplicate_join() {
     let (env, client, owner) = setup();
     seed_cards(&env, &client, &owner, 5);
