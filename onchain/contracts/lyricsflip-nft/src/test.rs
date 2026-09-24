@@ -168,6 +168,32 @@ fn approval_by_non_owner_is_rejected() {
 
     let result = client.try_approve(&mallory, &mallory, &token_id, &1000);
     assert_eq!(result, Err(Ok(Error::InsufficientApproval.into())));
+// ---------------------------------------------------------------------------
+// LF-012 – persistent TokenOwner entries survive a ledger advance
+// ---------------------------------------------------------------------------
+
+/// After minting a token and advancing the ledger sequence far past Soroban's
+/// default minimum TTL, `owner_of` must still succeed because `extend_ttl`
+/// was called on the `TokenOwner` entry during `mint`.
+#[test]
+fn ttl_survival_token_owner_survives_ledger_advance() {
+    use soroban_sdk::testutils::Ledger as _;
+
+    let (env, client, _owner, minter) = setup();
+    let recipient = Address::generate(&env);
+
+    let token_id = client.mint(&minter, &recipient);
+    assert_eq!(token_id, 1);
+
+    // Advance ledger sequence well past the default minimum TTL (4 096).
+    env.ledger().set_sequence_number(100_000);
+
+    // TokenOwner must still be readable.
+    let owner_after = client.owner_of(&token_id);
+    assert_eq!(
+        owner_after, recipient,
+        "token owner should still be readable after ledger advance"
+    );
 }
 
 #[test]

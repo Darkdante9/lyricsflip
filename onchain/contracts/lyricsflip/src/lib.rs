@@ -13,6 +13,8 @@ pub use events::{
     RoundCancelled, RoundCompleted, RoundCreated, RoundJoined, RoundLeft, RoundStarted,
 };
 pub use types::{Answer, Card, DataKey, Genre, Milestone, PlayerStats, QuestionCard, Role, Round};
+pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
+pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, QuestionKind, Role, Round};
 
 use soroban_sdk::{
     contract, contractclient, contractimpl, panic_with_error, Address, Bytes, BytesN, Env, Map,
@@ -47,6 +49,39 @@ pub trait NftInterface {
 /// `get_open_rounds`). Larger `limit` values are clamped to this.
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
+// ---------------------------------------------------------------------------
+// LF-012 – TTL policy
+//
+// Soroban persistent and instance entries are archived when their TTL expires.
+// We extend TTLs on every write (and on reads for hot keys) so that active
+// game data stays available on testnet / mainnet.
+//
+// Ledger cadence on Stellar mainnet ≈ 5 s, so:
+//   DAY_IN_LEDGERS  ≈ 17 280 ledgers/day
+//   BUMP_AMOUNT     = 30 days of ledgers
+//   LIFETIME_THRESHOLD = 7 days — extend only when less than this remains,
+//                        avoiding a per-call extend when lots of TTL is left.
+// ---------------------------------------------------------------------------
+pub const DAY_IN_LEDGERS: u32 = 17_280;
+pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS; // ~30 days
+pub const LIFETIME_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS; // ~7 days
+
+/// Extend instance storage TTL (owner, admin map, counters, config).
+#[inline]
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Extend a single persistent storage entry by key.
+#[inline]
+fn bump_persistent<K: soroban_sdk::TryIntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
 #[contract]
 pub struct LyricsFlip;
 
@@ -60,6 +95,7 @@ impl LyricsFlip {
         }
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(&DataKey::Admin(owner), &true);
+        bump_instance(&env);
     }
 
     // ---- Views ----
@@ -146,7 +182,8 @@ impl LyricsFlip {
                     stats.rounds_won += 1;
                     env.storage()
                         .persistent()
-                        .set(&DataKey::PlayerStats(player), &stats);
+                        .set(&DataKey::PlayerStats(player.clone()), &stats);
+                    bump_persistent(&env, &DataKey::PlayerStats(player));
                 }
             }
         }
@@ -162,9 +199,12 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundFinalized(round_id), &true);
+        bump_persistent(&env, &DataKey::RoundFinalized(round_id));
+        bump_instance(&env);
     }
 
     pub fn get_cards_count(env: Env) -> u64 {
+        bump_instance(&env);
         env.storage()
             .instance()
             .get(&DataKey::CardsCount)
@@ -172,6 +212,7 @@ impl LyricsFlip {
     }
 
     pub fn get_round_count(env: Env) -> u64 {
+        bump_instance(&env);
         env.storage()
             .instance()
             .get(&DataKey::RoundCount)
@@ -235,6 +276,7 @@ impl LyricsFlip {
     }
 
     pub fn get_cards_per_round(env: Env) -> u32 {
+        bump_instance(&env);
         env.storage()
             .instance()
             .get(&DataKey::CardsPerRound)
@@ -242,10 +284,13 @@ impl LyricsFlip {
     }
 
     pub fn get_card(env: Env, card_id: u64) -> Card {
-        env.storage()
+        let card: Card = env
+            .storage()
             .persistent()
             .get(&DataKey::Card(card_id))
-            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingCard))
+            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingCard));
+        bump_persistent(&env, &DataKey::Card(card_id));
+        card
     }
 
     pub fn get_cards_of_genre(env: Env, genre: Genre, seed: u64) -> Vec<Card> {
@@ -258,6 +303,7 @@ impl LyricsFlip {
         if limit == 0 {
             panic_with_error!(env, Error::EmptyGenreCards);
         }
+        bump_persistent(&env, &DataKey::GenreCards(genre));
         let amount = Self::get_cards_per_round(env.clone()) as u64;
         let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
 
@@ -273,12 +319,13 @@ impl LyricsFlip {
         let ids: Vec<u64> = env
             .storage()
             .persistent()
-            .get(&DataKey::ArtistCards(artist))
+            .get(&DataKey::ArtistCards(artist.clone()))
             .unwrap_or(Vec::new(&env));
         let limit = ids.len() as u64;
         if limit == 0 {
             panic_with_error!(env, Error::ArtistCardsIsZero);
         }
+        bump_persistent(&env, &DataKey::ArtistCards(artist));
         let amount = Self::get_cards_per_round(env.clone()) as u64;
         let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
 
@@ -300,6 +347,7 @@ impl LyricsFlip {
         if limit == 0 {
             panic_with_error!(env, Error::EmptyYearCards);
         }
+        bump_persistent(&env, &DataKey::YearCards(year));
         let amount = Self::get_cards_per_round(env.clone()) as u64;
         let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
 
@@ -312,14 +360,25 @@ impl LyricsFlip {
     }
 
     pub fn get_player_stat(env: Env, player: Address) -> PlayerStats {
-        env.storage()
+        let stats: PlayerStats = env
+            .storage()
             .persistent()
-            .get(&DataKey::PlayerStats(player))
-            .unwrap_or(PlayerStats::zero())
+            .get(&DataKey::PlayerStats(player.clone()))
+            .unwrap_or(PlayerStats::zero());
+        // Extend TTL on read so active players' stats don't get archived.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::PlayerStats(player.clone()))
+        {
+            bump_persistent(&env, &DataKey::PlayerStats(player));
+        }
+        stats
     }
 
     pub fn is_admin(env: Env, role: Role, address: Address) -> bool {
         let Role::Admin = role;
+        bump_instance(&env);
         env.storage()
             .instance()
             .get(&DataKey::Admin(address))
@@ -371,12 +430,17 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundPlayers(round_id), &players);
+        bump_persistent(&env, &DataKey::RoundPlayers(round_id));
+
         env.storage()
             .persistent()
             .set(&DataKey::RoundCards(round_id), &cards);
+        bump_persistent(&env, &DataKey::RoundCards(round_id));
+
         env.storage()
             .persistent()
             .set(&DataKey::Round(round_id), &round);
+        bump_persistent(&env, &DataKey::Round(round_id));
 
         env.storage().persistent().set(
             &DataKey::RoundCreatedAt(round_id),
@@ -386,6 +450,9 @@ impl LyricsFlip {
         let mut open = Self::read_open_rounds(&env);
         open.push_back(round_id);
         env.storage().persistent().set(&DataKey::OpenRounds, &open);
+        bump_persistent(&env, &DataKey::OpenRounds);
+
+        bump_instance(&env);
 
         RoundCreated {
             round_id,
@@ -419,6 +486,7 @@ impl LyricsFlip {
         let players = Self::read_round_players(&env, round_id);
 
         env.storage().persistent().set(&ready_key, &true);
+        bump_persistent(&env, &ready_key);
 
         let ready_count_key = DataKey::RoundReadyCount(round_id);
         let ready_count: u32 = env
@@ -430,6 +498,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&ready_count_key, &ready_count);
+        bump_persistent(&env, &ready_count_key);
 
         PlayerReady {
             round_id,
@@ -448,7 +517,8 @@ impl LyricsFlip {
                 stats.total_rounds += 1;
                 env.storage()
                     .persistent()
-                    .set(&DataKey::PlayerStats(player), &stats);
+                    .set(&DataKey::PlayerStats(player.clone()), &stats);
+                bump_persistent(&env, &DataKey::PlayerStats(player));
             }
 
             let start_time = env.ledger().timestamp();
@@ -458,8 +528,17 @@ impl LyricsFlip {
             env.storage()
                 .persistent()
                 .set(&DataKey::Round(round_id), &round);
+            bump_persistent(&env, &DataKey::Round(round_id));
 
             Self::remove_open_round(&env, round_id);
+            let mut open = Self::read_open_rounds(&env);
+            if let Some(idx) = open.first_index_of(round_id) {
+                open.remove(idx);
+                env.storage().persistent().set(&DataKey::OpenRounds, &open);
+                bump_persistent(&env, &DataKey::OpenRounds);
+            }
+
+            bump_instance(&env);
 
             RoundStarted {
                 round_id,
@@ -492,6 +571,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundPlayers(round_id), &players);
+        bump_persistent(&env, &DataKey::RoundPlayers(round_id));
 
         RoundJoined {
             round_id,
@@ -598,10 +678,12 @@ impl LyricsFlip {
             .get(round.next_card_index)
             .unwrap_or_else(|| panic_with_error!(env, Error::RoundCompleted));
         let card = Self::get_card(env.clone(), card_id);
-        env.storage().persistent().set(
-            &DataKey::RoundCardStartedAt((round_id, card_id)),
-            &env.ledger().timestamp(),
-        );
+
+        let started_at_key = DataKey::RoundCardStartedAt((round_id, card_id));
+        env.storage()
+            .persistent()
+            .set(&started_at_key, &env.ledger().timestamp());
+        bump_persistent(&env, &started_at_key);
 
         // The round is marked completed by `finalize_round`, so players can
         // still answer the last card after it is drawn.
@@ -609,6 +691,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::Round(round_id), &round);
+        bump_persistent(&env, &DataKey::Round(round_id));
 
         card
     }
@@ -622,6 +705,7 @@ impl LyricsFlip {
         env.storage()
             .instance()
             .set(&DataKey::CardsPerRound, &value);
+        bump_instance(&env);
     }
 
     pub fn add_card(env: Env, caller: Address, card: Card) {
@@ -644,6 +728,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::ArtistCards(card.artist.clone()), &artist_cards);
+        bump_persistent(&env, &DataKey::ArtistCards(card.artist.clone()));
 
         let mut genre_cards: Vec<u64> = env
             .storage()
@@ -654,6 +739,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::GenreCards(card.genre), &genre_cards);
+        bump_persistent(&env, &DataKey::GenreCards(card.genre));
 
         let mut year_cards: Vec<u64> = env
             .storage()
@@ -664,11 +750,15 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::YearCards(card.year), &year_cards);
+        bump_persistent(&env, &DataKey::YearCards(card.year));
 
         env.storage()
             .persistent()
             .set(&DataKey::Card(card_id), &card);
+        bump_persistent(&env, &DataKey::Card(card_id));
+
         env.storage().instance().set(&DataKey::CardsCount, &card_id);
+        bump_instance(&env);
     }
 
     /// Owner-only. The owner may manage roles even after revoking their own
@@ -741,6 +831,8 @@ impl LyricsFlip {
         caller.require_auth();
         Self::assert_owner(&env, &caller);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+            .set(&DataKey::Admin(recipient), &is_enable);
+        bump_instance(&env);
     }
 
     pub fn submit_answer(env: Env, caller: Address, round_id: u64, answer: Answer) -> bool {
@@ -776,6 +868,7 @@ impl LyricsFlip {
             return false;
         }
         env.storage().persistent().set(&answered_key, &true);
+        bump_persistent(&env, &answered_key);
 
         let answer_started_at: u64 = env
             .storage()
@@ -790,6 +883,7 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundAnswerTimes(round_id), &answer_times);
+        bump_persistent(&env, &DataKey::RoundAnswerTimes(round_id));
 
         // Answers after the card window are scored as wrong (not rejected),
         // so the player still counts as having answered the card.
@@ -807,6 +901,7 @@ impl LyricsFlip {
             env.storage()
                 .persistent()
                 .set(&DataKey::RoundScores(round_id), &scores);
+            bump_persistent(&env, &DataKey::RoundScores(round_id));
         }
 
         let mut stats = Self::get_player_stat(env.clone(), caller.clone());
@@ -820,7 +915,8 @@ impl LyricsFlip {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::PlayerStats(caller), &stats);
+            .set(&DataKey::PlayerStats(caller.clone()), &stats);
+        bump_persistent(&env, &DataKey::PlayerStats(caller));
 
         is_answer_correct
     }
@@ -880,14 +976,26 @@ impl LyricsFlip {
     }
 
     pub fn build_question_card(env: Env, card: Card, seed: u64) -> QuestionCard {
+    pub fn build_question_card(env: Env, card: Card, seed: u64, kind: QuestionKind) -> QuestionCard {
         let cards_count: u64 = env
             .storage()
             .instance()
             .get(&DataKey::CardsCount)
             .unwrap_or(0);
-        let random_ids = Self::get_random_numbers(&env, seed, 10, cards_count, false);
 
-        let mut false_answers: Vec<String> = Vec::new(&env);
+        match kind {
+            QuestionKind::Title => Self::build_title_question(&env, card, seed, cards_count),
+            QuestionKind::Artist => Self::build_artist_question(&env, card, seed, cards_count),
+            QuestionKind::Year => Self::build_year_question(&env, card, seed),
+        }
+    }
+
+    // ---- build_question_card helpers ----
+
+    fn build_title_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_ids = Self::get_random_numbers(env, seed, 10, cards_count, false);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
         for id in random_ids.iter() {
             if false_answers.len() >= 3 {
                 break;
@@ -902,7 +1010,7 @@ impl LyricsFlip {
 
         let mut extra_seed = seed + 1;
         while false_answers.len() < 3 {
-            let ids = Self::get_random_numbers(&env, extra_seed, 1, cards_count, false);
+            let ids = Self::get_random_numbers(env, extra_seed, 1, cards_count, false);
             let id = ids.get(0).unwrap();
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
@@ -913,17 +1021,120 @@ impl LyricsFlip {
             extra_seed += 1;
         }
 
-        let mut options: Vec<String> = Vec::new(&env);
+        let mut options: Vec<String> = Vec::new(env);
         options.push_back(card.title.clone());
         for answer in false_answers.iter() {
             options.push_back(answer.clone());
         }
 
-        let shuffled = Self::shuffle_strings(&env, options, seed);
+        let shuffled = Self::shuffle_strings(env, options, seed);
 
         QuestionCard {
             lyric: card.lyrics.clone(),
             timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Title,
+            option_one: shuffled.get(0).unwrap(),
+            option_two: shuffled.get(1).unwrap(),
+            option_three: shuffled.get(2).unwrap(),
+            option_four: shuffled.get(3).unwrap(),
+        }
+    }
+
+    fn build_artist_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_ids = Self::get_random_numbers(env, seed, 10, cards_count, false);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
+        for id in random_ids.iter() {
+            if false_answers.len() >= 3 {
+                break;
+            }
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
+            }
+        }
+
+        let mut extra_seed = seed + 1;
+        while false_answers.len() < 3 {
+            let ids = Self::get_random_numbers(env, extra_seed, 1, cards_count, false);
+            let id = ids.get(0).unwrap();
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
+            }
+            extra_seed += 1;
+        }
+
+        let mut options: Vec<String> = Vec::new(env);
+        options.push_back(card.artist.clone());
+        for answer in false_answers.iter() {
+            options.push_back(answer.clone());
+        }
+
+        let shuffled = Self::shuffle_strings(env, options, seed);
+
+        QuestionCard {
+            lyric: card.lyrics.clone(),
+            timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Artist,
+            option_one: shuffled.get(0).unwrap(),
+            option_two: shuffled.get(1).unwrap(),
+            option_three: shuffled.get(2).unwrap(),
+            option_four: shuffled.get(3).unwrap(),
+        }
+    }
+
+    /// Year distractors: pick 6 random offsets in the range [-5, +5] \ {0},
+    /// deduplicate, and take the first 3. Year options are stored as their
+    /// decimal string representation so they fit into the same `Vec<String>`
+    /// shuffle as Title and Artist questions.
+    fn build_year_question(env: &Env, card: Card, seed: u64) -> QuestionCard {
+        // Generate offsets deterministically from the seed.
+        let offsets: [i64; 10] = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5];
+        let mut current_seed = seed;
+        // Fisher-Yates shuffle of the offsets array using the LCG.
+        let mut shuffled_offsets = offsets;
+        let mut j = 10usize;
+        while j > 1 {
+            j -= 1;
+            current_seed =
+                current_seed.wrapping_mul(1664525).wrapping_add(1013904223) % 0xFFFF_FFFFu64;
+            let rand_idx = (current_seed % (j as u64 + 1)) as usize;
+            shuffled_offsets.swap(j, rand_idx);
+        }
+
+        let correct_year = card.year as i64;
+        let mut false_years: Vec<String> = Vec::new(env);
+        for &offset in shuffled_offsets.iter() {
+            if false_years.len() >= 3 {
+                break;
+            }
+            let candidate_year = correct_year + offset;
+            if candidate_year > 0 {
+                let year_str = Self::u64_to_string(env, candidate_year as u64);
+                if !Self::contains_string(&false_years, &year_str) {
+                    false_years.push_back(year_str);
+                }
+            }
+        }
+
+        let correct_str = Self::u64_to_string(env, card.year);
+        let mut options: Vec<String> = Vec::new(env);
+        options.push_back(correct_str);
+        for y in false_years.iter() {
+            options.push_back(y.clone());
+        }
+
+        let shuffled = Self::shuffle_strings(env, options, seed);
+
+        QuestionCard {
+            lyric: card.lyrics.clone(),
+            timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Year,
             option_one: shuffled.get(0).unwrap(),
             option_two: shuffled.get(1).unwrap(),
             option_three: shuffled.get(2).unwrap(),
@@ -934,24 +1145,33 @@ impl LyricsFlip {
     // ---- Internal helpers ----
 
     fn read_round(env: &Env, round_id: u64) -> Round {
-        env.storage()
+        let round: Round = env
+            .storage()
             .persistent()
             .get(&DataKey::Round(round_id))
-            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingRound))
+            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingRound));
+        bump_persistent(env, &DataKey::Round(round_id));
+        round
     }
 
     fn read_round_cards(env: &Env, round_id: u64) -> Vec<u64> {
-        env.storage()
+        let cards = env
+            .storage()
             .persistent()
             .get(&DataKey::RoundCards(round_id))
-            .unwrap_or(Vec::new(env))
+            .unwrap_or(Vec::new(env));
+        bump_persistent(env, &DataKey::RoundCards(round_id));
+        cards
     }
 
     fn read_round_players(env: &Env, round_id: u64) -> Vec<Address> {
-        env.storage()
+        let players = env
+            .storage()
             .persistent()
             .get(&DataKey::RoundPlayers(round_id))
-            .unwrap_or(Vec::new(env))
+            .unwrap_or(Vec::new(env));
+        bump_persistent(env, &DataKey::RoundPlayers(round_id));
+        players
     }
 
     fn read_round_scores(env: &Env, round_id: u64) -> Map<Address, u64> {
@@ -1105,6 +1325,31 @@ impl LyricsFlip {
         }
     }
 
+    /// Converts a `u64` year value to its decimal string representation.
+    /// Soroban's `no_std` environment has no format!/write! macros, so we
+    /// build the string manually by repeated division.
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+        // Collect digits in reverse.
+        let mut digits: [u8; 20] = [0u8; 20];
+        let mut len = 0usize;
+        while n > 0 {
+            digits[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
+        }
+        // Reverse into a fixed-size array and build a `&str`.
+        let mut buf: [u8; 20] = [0u8; 20];
+        for i in 0..len {
+            buf[i] = digits[len - 1 - i];
+        }
+        // SAFETY: all bytes are ASCII digits.
+        let s = core::str::from_utf8(&buf[..len]).unwrap_or("0");
+        String::from_str(env, s)
+    }
+
     fn contains_string(v: &Vec<String>, target: &String) -> bool {
         for item in v.iter() {
             if item == *target {
@@ -1136,12 +1381,18 @@ impl LyricsFlip {
         result
     }
 
-    /// Ported from `_get_random_numbers` in the Cairo contract: hashes
-    /// `(seed, ledger sequence, ledger timestamp, index)` in place of Cairo's
-    /// `(seed, block_number, timestamp, index)` Poseidon-hash entropy, then
-    /// reduces mod `limit` and dedupes until `amount` unique numbers are
-    /// found. `for_index` mirrors the same +1 offset used when the numbers
-    /// are card IDs rather than array indices.
+    /// LF-011 fix: partial Fisher-Yates shuffle — O(limit) with no
+    /// deduplication loop.
+    ///
+    /// Builds an index array `[0, 1, …, limit-1]`, performs a single-pass
+    /// Fisher-Yates shuffle seeded from `(seed, ledger_sequence,
+    /// ledger_timestamp)`, and returns the first `amount` elements. This
+    /// replaces the old SHA-256 + dedup loop which had coupon-collector
+    /// worst-case cost when `amount ≈ limit`.
+    ///
+    /// `for_index`: when `false` the results are shifted by +1 so they
+    /// become 1-based card IDs instead of 0-based array indices (mirrors the
+    /// same offset used by the old implementation).
     fn get_random_numbers(
         env: &Env,
         seed: u64,
@@ -1156,41 +1407,52 @@ impl LyricsFlip {
             panic_with_error!(env, Error::LimitMustBeGreaterThanZero);
         }
 
+        // Build a compact index array [0..limit).
+        let mut indices: Vec<u64> = Vec::new(env);
+        for i in 0..limit {
+            indices.push_back(i);
+        }
+
+        // Seed an LCG from the on-chain entropy.
+        // Using the same 32-byte SHA-256 block as before, but only once.
         let sequence = env.ledger().sequence() as u64;
         let timestamp = env.ledger().timestamp();
+        let mut buf = [0u8; 32];
+        buf[0..8].copy_from_slice(&seed.to_be_bytes());
+        buf[8..16].copy_from_slice(&sequence.to_be_bytes());
+        buf[16..24].copy_from_slice(&timestamp.to_be_bytes());
+        // last 8 bytes left zero — distinguishes this from per-iteration hashes
+        let bytes = Bytes::from_array(env, &buf);
+        let hash = env.crypto().sha256(&bytes).to_array();
+        let mut rng_state = u64::from_be_bytes([
+            hash[0], hash[1], hash[2], hash[3], hash[4], hash[5], hash[6], hash[7],
+        ]);
 
-        let mut unique_numbers: Vec<u64> = Vec::new(env);
-        let mut i: u64 = 0;
-        while (unique_numbers.len() as u64) < amount {
-            let mut buf = [0u8; 32];
-            buf[0..8].copy_from_slice(&seed.to_be_bytes());
-            buf[8..16].copy_from_slice(&sequence.to_be_bytes());
-            buf[16..24].copy_from_slice(&timestamp.to_be_bytes());
-            buf[24..32].copy_from_slice(&i.to_be_bytes());
-            let bytes = Bytes::from_array(env, &buf);
-            let hash = env.crypto().sha256(&bytes).to_array();
-
-            let mut num_bytes = [0u8; 8];
-            num_bytes.copy_from_slice(&hash[0..8]);
-            let rand_u64 = u64::from_be_bytes(num_bytes);
-            let mut rand = rand_u64 % limit;
-            if !for_index {
-                rand += 1;
-            }
-
-            let mut seen = false;
-            for n in unique_numbers.iter() {
-                if n == rand {
-                    seen = true;
-                    break;
-                }
-            }
-            if !seen {
-                unique_numbers.push_back(rand);
-            }
-
+        // Partial Fisher-Yates: shuffle only the first `amount` positions.
+        // Iteration i swaps indices[i] with a random position in [i, limit).
+        let mut i: u32 = 0;
+        while (i as u64) < amount {
+            // LCG step (Numerical Recipes constants, same as shuffle_strings).
+            rng_state = rng_state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let range = limit - (i as u64);
+            let j = (i as u64) + (rng_state % range);
+            // swap indices[i] and indices[j]
+            let a = indices.get(i).unwrap();
+            let b = indices.get(j as u32).unwrap();
+            indices.set(i, b);
+            indices.set(j as u32, a);
             i += 1;
         }
-        unique_numbers
+
+        // Collect the first `amount` shuffled indices, applying the +1 offset
+        // when the caller wants 1-based card IDs.
+        let mut result: Vec<u64> = Vec::new(env);
+        for k in 0..(amount as u32) {
+            let v = indices.get(k).unwrap();
+            result.push_back(if for_index { v } else { v + 1 });
+        }
+        result
     }
 }
