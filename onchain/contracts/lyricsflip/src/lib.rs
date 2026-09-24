@@ -8,11 +8,14 @@ mod types;
 mod test;
 
 pub use errors::Error;
-pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
-pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, Role, Round};
+pub use events::{
+    AnswerSubmitted, CardAdded, CardDrawn, CardRemoved, CardUpdated, CardsPerRoundUpdated,
+    PlayerReady, RoleUpdated, RoundCompleted, RoundCreated, RoundJoined, RoundStarted,
+};
+pub use types::{Answer, Card, CardPos, DataKey, Genre, PlayerStats, QuestionCard, Role, Round};
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, Address, Bytes, Env, Map, String, Vec,
+    contract, contractimpl, panic_with_error, Address, Bytes, BytesN, Env, Map, String, Vec,
 };
 
 const DEFAULT_ROUND_DURATION_SECONDS: u64 = 300;
@@ -20,6 +23,66 @@ const DEFAULT_ROUND_DURATION_SECONDS: u64 = 300;
 /// Upper bound on the page size of the paginated list views (`get_rounds`,
 /// `get_open_rounds`). Larger `limit` values are clamped to this.
 pub const MAX_PAGE_LIMIT: u32 = 50;
+
+/// Maximum number of players in a round. Keeps the `RoundPlayers` vector
+/// (read on every join/answer/finalize) bounded.
+pub const MAX_ROUND_PLAYERS: u32 = 8;
+
+/// Card validation bounds. The upper year bound is the current year derived
+/// from the ledger timestamp.
+pub const MIN_CARD_YEAR: u64 = 1900;
+pub const MAX_LYRICS_LEN: u32 = 1000;
+const SECONDS_PER_YEAR: u64 = 31_556_952;
+
+/// Maximum number of cards accepted by one `add_cards` call. See
+/// `onchain/README.md` and `test::add_cards_max_batch_fits_budget`.
+pub const MAX_CARDS_PER_BATCH: u32 = 20;
+
+/// One of the card index lists (see `DataKey::CardAt` and friends).
+enum Index {
+    All,
+    Genre(Genre),
+    Artist(String),
+    Year(u64),
+}
+
+impl Index {
+    fn of(card: &Card) -> [Index; 4] {
+        [
+            Index::All,
+            Index::Genre(card.genre),
+            Index::Artist(card.artist.clone()),
+            Index::Year(card.year),
+        ]
+    }
+
+    fn count_key(&self) -> DataKey {
+        match self {
+            Index::All => DataKey::CardsCount,
+            Index::Genre(g) => DataKey::GenreCardCount(*g),
+            Index::Artist(a) => DataKey::ArtistCardCount(a.clone()),
+            Index::Year(y) => DataKey::YearCardCount(*y),
+        }
+    }
+
+    fn at_key(&self, i: u32) -> DataKey {
+        match self {
+            Index::All => DataKey::CardAt(i),
+            Index::Genre(g) => DataKey::GenreCardAt((*g, i)),
+            Index::Artist(a) => DataKey::ArtistCardAt((a.clone(), i)),
+            Index::Year(y) => DataKey::YearCardAt((*y, i)),
+        }
+    }
+
+    fn pos<'a>(&self, pos: &'a mut CardPos) -> &'a mut u32 {
+        match self {
+            Index::All => &mut pos.all,
+            Index::Genre(_) => &mut pos.genre,
+            Index::Artist(_) => &mut pos.artist,
+            Index::Year(_) => &mut pos.year,
+        }
+    }
+}
 
 #[contract]
 pub struct LyricsFlip;
@@ -119,11 +182,11 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundFinalized(round_id), &true);
+    }
+
+    /// Number of live (added and not removed) cards.
     pub fn get_cards_count(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0)
+        Self::index_len(&env, &Index::All) as u64
     }
 
     pub fn get_round_count(env: Env) -> u64 {
@@ -134,11 +197,7 @@ impl LyricsFlip {
     }
 
     pub fn get_genre_card_count(env: Env, genre: Genre) -> u32 {
-        env.storage()
-            .persistent()
-            .get::<_, Vec<u64>>(&DataKey::GenreCards(genre))
-            .map(|ids| ids.len())
-            .unwrap_or(0)
+        Self::index_len(&env, &Index::Genre(genre))
     }
 
     /// Returns up to `limit` rounds (clamped to `MAX_PAGE_LIMIT`) starting at
@@ -186,66 +245,15 @@ impl LyricsFlip {
     }
 
     pub fn get_cards_of_genre(env: Env, genre: Genre, seed: u64) -> Vec<Card> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::GenreCards(genre))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::EmptyGenreCards);
-        }
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
+        Self::draw_cards(&env, &Index::Genre(genre), seed, Error::EmptyGenreCards)
     }
 
     pub fn get_cards_of_artist(env: Env, artist: String, seed: u64) -> Vec<Card> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ArtistCards(artist))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::ArtistCardsIsZero);
-        }
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
+        Self::draw_cards(&env, &Index::Artist(artist), seed, Error::ArtistCardsIsZero)
     }
 
     pub fn get_cards_of_a_year(env: Env, year: u64, seed: u64) -> Vec<Card> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::YearCards(year))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::EmptyYearCards);
-        }
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
+        Self::draw_cards(&env, &Index::Year(year), seed, Error::EmptyYearCards)
     }
 
     pub fn get_player_stat(env: Env, player: Address) -> PlayerStats {
@@ -273,12 +281,11 @@ impl LyricsFlip {
         };
 
         let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let cards_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0);
-        let cards = Self::get_random_numbers(&env, seed, amount, cards_count, false);
+        let cards_count = Self::index_len(&env, &Index::All) as u64;
+        let mut cards: Vec<u64> = Vec::new(&env);
+        for idx in Self::get_random_numbers(&env, seed, amount, cards_count, true).iter() {
+            cards.push_back(Self::index_get(&env, &Index::All, idx as u32));
+        }
 
         let round_count: u64 = env
             .storage()
@@ -414,6 +421,9 @@ impl LyricsFlip {
         }
 
         let mut players = Self::read_round_players(&env, round_id);
+        if players.len() >= MAX_ROUND_PLAYERS {
+            panic_with_error!(env, Error::RoundFull);
+        }
         players.push_back(caller.clone());
         env.storage()
             .persistent()
@@ -446,6 +456,13 @@ impl LyricsFlip {
             &env.ledger().timestamp(),
         );
 
+        CardDrawn {
+            round_id,
+            index: round.next_card_index,
+            card_id,
+        }
+        .publish(&env);
+
         round.next_card_index += 1;
         if round.next_card_index >= round_cards.len() {
             round.is_completed = true;
@@ -466,53 +483,99 @@ impl LyricsFlip {
         env.storage()
             .instance()
             .set(&DataKey::CardsPerRound, &value);
+        CardsPerRoundUpdated { value }.publish(&env);
     }
 
-    pub fn add_card(env: Env, caller: Address, card: Card) {
+    /// Adds a card and returns its id. The `card_id` field of `card` is
+    /// ignored; the stored card carries the assigned id.
+    pub fn add_card(env: Env, caller: Address, card: Card) -> u64 {
         caller.require_auth();
         Self::assert_admin(&env, &caller);
+        Self::insert_card(&env, card)
+    }
 
-        let cards_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0);
-        let card_id = cards_count + 1;
+    /// Adds up to `MAX_CARDS_PER_BATCH` cards in one call and returns their
+    /// ids in order. The whole batch fails if any card is invalid.
+    pub fn add_cards(env: Env, caller: Address, cards: Vec<Card>) -> Vec<u64> {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller);
+        if cards.len() > MAX_CARDS_PER_BATCH {
+            panic_with_error!(env, Error::BatchTooLarge);
+        }
+        let mut ids: Vec<u64> = Vec::new(&env);
+        for card in cards.iter() {
+            ids.push_back(Self::insert_card(&env, card));
+        }
+        ids
+    }
 
-        let mut artist_cards: Vec<u64> = env
+    /// Replaces the contents of `card_id`, moving it between the genre,
+    /// artist and year indexes as needed.
+    pub fn update_card(env: Env, caller: Address, card_id: u64, card: Card) {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller);
+        let old = Self::get_card(env.clone(), card_id);
+        Self::validate_card(&env, &card);
+
+        let new_key = Self::card_key(&env, &card);
+        if let Some(existing) = env
             .storage()
             .persistent()
-            .get(&DataKey::ArtistCards(card.artist.clone()))
-            .unwrap_or(Vec::new(&env));
-        artist_cards.push_back(card_id);
+            .get::<_, u64>(&DataKey::CardKey(new_key.clone()))
+        {
+            if existing != card_id {
+                panic_with_error!(env, Error::DuplicateCard);
+            }
+        }
+
+        let mut pos = Self::read_card_pos(&env, card_id);
+        for index in Index::of(&old).iter().skip(1) {
+            Self::index_remove(&env, index, *index.pos(&mut pos));
+        }
         env.storage()
             .persistent()
-            .set(&DataKey::ArtistCards(card.artist.clone()), &artist_cards);
+            .remove(&DataKey::CardKey(Self::card_key(&env, &old)));
 
-        let mut genre_cards: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::GenreCards(card.genre))
-            .unwrap_or(Vec::new(&env));
-        genre_cards.push_back(card_id);
+        let card = Card { card_id, ..card };
+        for index in Index::of(&card).iter().skip(1) {
+            *index.pos(&mut pos) = Self::index_push(&env, index, card_id);
+        }
         env.storage()
             .persistent()
-            .set(&DataKey::GenreCards(card.genre), &genre_cards);
-
-        let mut year_cards: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::YearCards(card.year))
-            .unwrap_or(Vec::new(&env));
-        year_cards.push_back(card_id);
+            .set(&DataKey::CardPos(card_id), &pos);
         env.storage()
             .persistent()
-            .set(&DataKey::YearCards(card.year), &year_cards);
-
+            .set(&DataKey::CardKey(new_key), &card_id);
         env.storage()
             .persistent()
             .set(&DataKey::Card(card_id), &card);
-        env.storage().instance().set(&DataKey::CardsCount, &card_id);
+
+        CardUpdated {
+            card_id,
+            genre: card.genre,
+        }
+        .publish(&env);
+    }
+
+    /// Removes a card from storage and every index. Its id is not reused.
+    pub fn remove_card(env: Env, caller: Address, card_id: u64) {
+        caller.require_auth();
+        Self::assert_admin(&env, &caller);
+        let card = Self::get_card(env.clone(), card_id);
+
+        let mut pos = Self::read_card_pos(&env, card_id);
+        for index in Index::of(&card).iter() {
+            Self::index_remove(&env, index, *index.pos(&mut pos));
+        }
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CardKey(Self::card_key(&env, &card)));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::CardPos(card_id));
+        env.storage().persistent().remove(&DataKey::Card(card_id));
+
+        CardRemoved { card_id }.publish(&env);
     }
 
     pub fn set_role(env: Env, caller: Address, recipient: Address, role: Role, is_enable: bool) {
@@ -525,7 +588,13 @@ impl LyricsFlip {
         let Role::Admin = role;
         env.storage()
             .instance()
-            .set(&DataKey::Admin(recipient), &is_enable);
+            .set(&DataKey::Admin(recipient.clone()), &is_enable);
+        RoleUpdated {
+            account: recipient,
+            role,
+            enabled: is_enable,
+        }
+        .publish(&env);
     }
 
     pub fn submit_answer(env: Env, caller: Address, round_id: u64, answer: Answer) -> bool {
@@ -599,24 +668,28 @@ impl LyricsFlip {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::PlayerStats(caller), &stats);
+            .set(&DataKey::PlayerStats(caller.clone()), &stats);
+
+        AnswerSubmitted {
+            round_id,
+            player: caller,
+            correct: is_answer_correct,
+        }
+        .publish(&env);
 
         is_answer_correct
     }
 
     pub fn build_question_card(env: Env, card: Card, seed: u64) -> QuestionCard {
-        let cards_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0);
-        let random_ids = Self::get_random_numbers(&env, seed, 10, cards_count, false);
+        let cards_count = Self::index_len(&env, &Index::All) as u64;
+        let random_idxs = Self::get_random_numbers(&env, seed, 10, cards_count, true);
 
         let mut false_answers: Vec<String> = Vec::new(&env);
-        for id in random_ids.iter() {
+        for idx in random_idxs.iter() {
             if false_answers.len() >= 3 {
                 break;
             }
+            let id = Self::index_get(&env, &Index::All, idx as u32);
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
                 && !Self::contains_string(&false_answers, &candidate.title)
@@ -627,8 +700,8 @@ impl LyricsFlip {
 
         let mut extra_seed = seed + 1;
         while false_answers.len() < 3 {
-            let ids = Self::get_random_numbers(&env, extra_seed, 1, cards_count, false);
-            let id = ids.get(0).unwrap();
+            let idxs = Self::get_random_numbers(&env, extra_seed, 1, cards_count, true);
+            let id = Self::index_get(&env, &Index::All, idxs.get(0).unwrap() as u32);
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
                 && !Self::contains_string(&false_answers, &candidate.title)
@@ -657,6 +730,142 @@ impl LyricsFlip {
     }
 
     // ---- Internal helpers ----
+
+    fn validate_card(env: &Env, card: &Card) {
+        if card.title.is_empty() {
+            panic_with_error!(env, Error::InvalidCardTitle);
+        }
+        if card.artist.is_empty() {
+            panic_with_error!(env, Error::InvalidCardArtist);
+        }
+        if card.lyrics.is_empty() {
+            panic_with_error!(env, Error::InvalidCardLyrics);
+        }
+        if card.lyrics.len() > MAX_LYRICS_LEN {
+            panic_with_error!(env, Error::LyricsTooLong);
+        }
+        let current_year = 1970 + env.ledger().timestamp() / SECONDS_PER_YEAR;
+        if card.year < MIN_CARD_YEAR || card.year > current_year {
+            panic_with_error!(env, Error::InvalidCardYear);
+        }
+    }
+
+    /// Identity of a card for duplicate detection: sha256(title, 0x00, artist).
+    fn card_key(env: &Env, card: &Card) -> BytesN<32> {
+        let mut buf = card.title.to_bytes();
+        buf.push_back(0);
+        buf.append(&card.artist.to_bytes());
+        env.crypto().sha256(&buf).into()
+    }
+
+    fn insert_card(env: &Env, card: Card) -> u64 {
+        Self::validate_card(env, &card);
+        let key = Self::card_key(env, &card);
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::CardKey(key.clone()))
+        {
+            panic_with_error!(env, Error::DuplicateCard);
+        }
+
+        let card_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::LastCardId)
+            .unwrap_or(0)
+            + 1;
+        env.storage().instance().set(&DataKey::LastCardId, &card_id);
+
+        let card = Card { card_id, ..card };
+        let mut pos = CardPos {
+            all: 0,
+            genre: 0,
+            artist: 0,
+            year: 0,
+        };
+        for index in Index::of(&card).iter() {
+            *index.pos(&mut pos) = Self::index_push(env, index, card_id);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::CardPos(card_id), &pos);
+        env.storage()
+            .persistent()
+            .set(&DataKey::CardKey(key), &card_id);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Card(card_id), &card);
+
+        CardAdded {
+            card_id,
+            genre: card.genre,
+        }
+        .publish(env);
+        card_id
+    }
+
+    fn read_card_pos(env: &Env, card_id: u64) -> CardPos {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CardPos(card_id))
+            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingCard))
+    }
+
+    fn index_len(env: &Env, index: &Index) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&index.count_key())
+            .unwrap_or(0)
+    }
+
+    fn index_get(env: &Env, index: &Index, i: u32) -> u64 {
+        env.storage()
+            .persistent()
+            .get(&index.at_key(i))
+            .unwrap_or_else(|| panic_with_error!(env, Error::NonExistingCard))
+    }
+
+    /// Appends `card_id` and returns its position.
+    fn index_push(env: &Env, index: &Index, card_id: u64) -> u32 {
+        let len = Self::index_len(env, index);
+        env.storage().persistent().set(&index.at_key(len), &card_id);
+        env.storage()
+            .persistent()
+            .set(&index.count_key(), &(len + 1));
+        len
+    }
+
+    /// Swap-removes the entry at `pos`, updating the position of the card
+    /// that moves into the gap.
+    fn index_remove(env: &Env, index: &Index, pos: u32) {
+        let last = Self::index_len(env, index) - 1;
+        if pos != last {
+            let moved = Self::index_get(env, index, last);
+            env.storage().persistent().set(&index.at_key(pos), &moved);
+            let mut moved_pos = Self::read_card_pos(env, moved);
+            *index.pos(&mut moved_pos) = pos;
+            env.storage()
+                .persistent()
+                .set(&DataKey::CardPos(moved), &moved_pos);
+        }
+        env.storage().persistent().remove(&index.at_key(last));
+        env.storage().persistent().set(&index.count_key(), &last);
+    }
+
+    fn draw_cards(env: &Env, index: &Index, seed: u64, empty: Error) -> Vec<Card> {
+        let limit = Self::index_len(env, index) as u64;
+        if limit == 0 {
+            panic_with_error!(env, empty);
+        }
+        let amount = Self::get_cards_per_round(env.clone()) as u64;
+        let mut cards: Vec<Card> = Vec::new(env);
+        for idx in Self::get_random_numbers(env, seed, amount, limit, true).iter() {
+            let card_id = Self::index_get(env, index, idx as u32);
+            cards.push_back(Self::get_card(env.clone(), card_id));
+        }
+        cards
+    }
 
     fn read_round(env: &Env, round_id: u64) -> Round {
         env.storage()
@@ -769,6 +978,8 @@ impl LyricsFlip {
             winners = Vec::new(env);
         }
         winners
+    }
+
     fn read_open_rounds(env: &Env) -> Vec<u64> {
         env.storage()
             .persistent()

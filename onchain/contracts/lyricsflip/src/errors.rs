@@ -30,4 +30,12 @@ pub enum Error {
     RoundNotReady = 18,
     RoundAlreadyFinalized = 19,
     NonExistingCard = 17,
+    RoundFull = 21,
+    InvalidCardTitle = 26,
+    InvalidCardArtist = 27,
+    InvalidCardLyrics = 28,
+    InvalidCardYear = 29,
+    LyricsTooLong = 30,
+    DuplicateCard = 31,
+    BatchTooLarge = 32,
 }

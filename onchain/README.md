@@ -76,7 +76,7 @@ environment variables (see `frontend/src/lib/stellar/stellarConfig.ts`).
 
 | Function | Returns |
 | --- | --- |
-| `get_cards_count()` | Total number of cards added (`u64`) |
+| `get_cards_count()` | Number of live cards, i.e. added and not removed (`u64`) |
 | `get_round_count()` | Total number of rounds created (`u64`) |
 | `get_genre_card_count(genre)` | Number of cards in `genre` (`u32`) |
 | `get_rounds(start, limit)` | Up to `limit` rounds from round id `start` (ids begin at 1), ascending |
@@ -84,6 +84,57 @@ environment variables (see `frontend/src/lib/stellar/stellarConfig.ts`).
 
 Both paginated views clamp `limit` to `MAX_PAGE_LIMIT` (50) and return an
 empty list once `start` is past the end.
+
+## Card catalogue
+
+Admins manage cards with `add_card`, `add_cards`, `update_card` and
+`remove_card`. `add_card`/`add_cards` return the assigned id(s) and ignore the
+`card_id` field of the input. Ids are never reused after a removal.
+
+Every card is validated: `title`, `artist` and `lyrics` must be non-empty,
+`lyrics` at most `MAX_LYRICS_LEN` (1000) bytes, and `year` between 1900 and
+the current year (derived from the ledger timestamp). A card with the same
+`title` + `artist` as an existing card is rejected as `DuplicateCard`.
+
+The global, genre, artist and year indexes are each stored as a count plus one
+ledger entry per item (`CardAt(i)`, `GenreCardAt((genre, i))`, …) and removals
+swap the last item into the gap. Adding a card therefore reads and writes the
+same number of entries (13 writes, about 1.9 KB) whether it is the first or
+the thousandth card in its genre; see `test::add_card_cost_does_not_grow_with_index_size`.
+
+Rounds are capped at `MAX_ROUND_PLAYERS` (8) players so the per-round player
+list stays bounded.
+
+### Batch size
+
+`add_cards` accepts at most `MAX_CARDS_PER_BATCH` (**20**) cards. A full batch
+on a fresh catalogue measures about 19.2M instructions, 152 write entries and
+24 KB written, against the Mainnet per-transaction limits of 400M
+instructions and 200 write entries (as bundled with soroban-sdk 27). Each card
+costs roughly 7 new ledger entries, so write entries are the binding limit and
+batches above ~25 cards would not fit. `test::add_cards_max_batch_fits_budget`
+runs a full batch with Mainnet limits enforced.
+
+## Events
+
+Topics are listed in order after the event name, which soroban-sdk adds as the
+first topic (snake_case, e.g. `card_added`). Data is a map of the remaining
+fields.
+
+| Event | Emitted by | Topics | Data |
+| --- | --- | --- | --- |
+| `RoundCreated` | `create_round` | `round_id: u64`, `admin: Address` | `created_time: u64` |
+| `RoundJoined` | `join_round` | `round_id: u64`, `player: Address` | `joined_time: u64` |
+| `PlayerReady` | `start_round` | `round_id: u64`, `player: Address` | `ready_time: u64` |
+| `RoundStarted` | `start_round` (last player ready) | `round_id: u64`, `admin: Address` | `start_time: u64` |
+| `CardDrawn` | `next_card` | `round_id: u64` | `index: u32` (position in the round), `card_id: u64` |
+| `AnswerSubmitted` | `submit_answer` (first answer per card) | `round_id: u64`, `player: Address` | `correct: bool` |
+| `RoundCompleted` | `finalize_round` | `round_id: u64` | `winners: Vec<Address>`, `scores: Map<Address, u64>` |
+| `CardAdded` | `add_card`, `add_cards` (one per card) | `card_id: u64`, `genre: Genre` | – |
+| `CardUpdated` | `update_card` | `card_id: u64`, `genre: Genre` (new genre) | – |
+| `CardRemoved` | `remove_card` | `card_id: u64` | – |
+| `RoleUpdated` | `set_role` | `account: Address` | `role: Role`, `enabled: bool` |
+| `CardsPerRoundUpdated` | `set_cards_per_round` | – | `value: u32` |
 
 ## Error codes
 
@@ -117,6 +168,14 @@ Every variant is currently referenced by the contract. The ones marked
 | 15 | `AmountExceedsLimit` | Asked for more random cards than exist (e.g. cards-per-round larger than the catalogue) |
 | 16 | `LimitMustBeGreaterThanZero` | Random selection over an empty set (no cards added yet) |
 | 17 | `NonExistingCard` | No card with the given id |
+| 21 | `RoundFull` | Round already has `MAX_ROUND_PLAYERS` players |
+| 26 | `InvalidCardTitle` | Card `title` is empty |
+| 27 | `InvalidCardArtist` | Card `artist` is empty |
+| 28 | `InvalidCardLyrics` | Card `lyrics` is empty |
+| 29 | `InvalidCardYear` | Card `year` is before 1900 or after the current year |
+| 30 | `LyricsTooLong` | Card `lyrics` exceed `MAX_LYRICS_LEN` bytes |
+| 31 | `DuplicateCard` | Another card already has this `title` + `artist` |
+| 32 | `BatchTooLarge` | `add_cards` got more than `MAX_CARDS_PER_BATCH` cards |
 
 ### `lyricsflip-nft`
 
