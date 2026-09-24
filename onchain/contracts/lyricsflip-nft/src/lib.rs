@@ -5,8 +5,40 @@ mod test;
 
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Env, String,
+    BytesN, Env, String,
 };
+
+/// Bumped on every release that changes the contract's code; see `upgrade`.
+pub const VERSION: u32 = 1;
+
+/// Longest `base_uri` accepted by `set_base_uri`, so `token_uri` fits in a
+/// fixed buffer alongside the largest `u128` token id (39 digits).
+pub const MAX_BASE_URI_LEN: u32 = 200;
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MinterUpdated {
+    pub old_minter: Address,
+    pub new_minter: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipTransferStarted {
+    #[topic]
+    pub owner: Address,
+    #[topic]
+    pub pending_owner: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipTransferred {
+    #[topic]
+    pub old_owner: Address,
+    #[topic]
+    pub new_owner: Address,
+}
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -81,12 +113,19 @@ pub enum Error {
     InsufficientApproval = 6,
     /// `live_until_ledger` is in the past (and not 0 for a revoke).
     InvalidLiveUntilLedger = 7,
+    /// Caller is not the contract owner.
+    NotOwner = 8,
+    /// Caller of `accept_ownership` is not the pending owner.
+    NotPendingOwner = 9,
+    /// `base_uri` is longer than `MAX_BASE_URI_LEN`.
+    BaseUriTooLong = 10,
 }
 
 #[contracttype]
 #[derive(Clone)]
 enum DataKey {
     Owner,
+    PendingOwner,
     Minter,
     TokenName,
     TokenSymbol,
@@ -114,6 +153,7 @@ impl LyricsFlipNFT {
         if env.storage().instance().has(&DataKey::Owner) {
             panic_with_error!(env, Error::AlreadyInitialized);
         }
+        Self::assert_base_uri_len(&env, &base_uri);
         env.storage().instance().set(&DataKey::Owner, &owner);
         env.storage().instance().set(&DataKey::Minter, &minter);
         env.storage()
@@ -281,11 +321,120 @@ impl LyricsFlipNFT {
         env.storage().instance().get(&DataKey::BaseUri).unwrap()
     }
 
+    /// `base_uri` followed by the decimal token id.
+    pub fn token_uri(env: Env, token_id: u128) -> String {
+        Self::owner_of(env.clone(), token_id);
+        let base = Self::base_uri(env.clone());
+        let base_len = base.len() as usize;
+        let mut buf = [0u8; MAX_BASE_URI_LEN as usize + 39];
+        base.copy_into_slice(&mut buf[..base_len]);
+
+        let mut digits = [0u8; 39];
+        let mut n = token_id;
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 {
+                break;
+            }
+        }
+        let len = base_len + digits.len() - i;
+        buf[base_len..len].copy_from_slice(&digits[i..]);
+        String::from_bytes(&env, &buf[..len])
+    }
+
     pub fn token_count(env: Env) -> u128 {
         env.storage()
             .instance()
             .get(&DataKey::TokenCount)
             .unwrap_or(0)
+    }
+
+    pub fn owner(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Owner).unwrap()
+    }
+
+    pub fn minter(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Minter).unwrap()
+    }
+
+    pub fn pending_owner(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingOwner)
+    }
+
+    pub fn version() -> u32 {
+        VERSION
+    }
+
+    // ---- Owner-only administration ----
+
+    pub fn set_base_uri(env: Env, caller: Address, base_uri: String) {
+        Self::assert_owner(&env, &caller);
+        Self::assert_base_uri_len(&env, &base_uri);
+        env.storage().instance().set(&DataKey::BaseUri, &base_uri);
+    }
+
+    /// Points minting at a new minter, e.g. a redeployed game contract. The
+    /// previous minter can no longer mint.
+    pub fn set_minter(env: Env, caller: Address, new_minter: Address) {
+        Self::assert_owner(&env, &caller);
+        let old_minter = Self::minter(env.clone());
+        env.storage().instance().set(&DataKey::Minter, &new_minter);
+        MinterUpdated {
+            old_minter,
+            new_minter,
+        }
+        .publish(&env);
+    }
+
+    /// Step one of an ownership transfer; `new_owner` must then call
+    /// `accept_ownership`. Calling again replaces the pending owner.
+    pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
+        Self::assert_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingOwner, &new_owner);
+        OwnershipTransferStarted {
+            owner: caller,
+            pending_owner: new_owner,
+        }
+        .publish(&env);
+    }
+
+    pub fn accept_ownership(env: Env, caller: Address) {
+        caller.require_auth();
+        if Self::pending_owner(env.clone()) != Some(caller.clone()) {
+            panic_with_error!(env, Error::NotPendingOwner);
+        }
+        let old_owner = Self::owner(env.clone());
+        env.storage().instance().set(&DataKey::Owner, &caller);
+        env.storage().instance().remove(&DataKey::PendingOwner);
+        OwnershipTransferred {
+            old_owner,
+            new_owner: caller,
+        }
+        .publish(&env);
+    }
+
+    /// Replaces this contract's code in place, keeping all storage.
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        Self::assert_owner(&env, &caller);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    fn assert_owner(env: &Env, caller: &Address) {
+        caller.require_auth();
+        if *caller != Self::owner(env.clone()) {
+            panic_with_error!(env, Error::NotOwner);
+        }
+    }
+
+    fn assert_base_uri_len(env: &Env, base_uri: &String) {
+        if base_uri.len() > MAX_BASE_URI_LEN {
+            panic_with_error!(env, Error::BaseUriTooLong);
+        }
     }
 
     fn do_transfer(env: &Env, from: &Address, to: &Address, token_id: u128) {

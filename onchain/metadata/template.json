@@ -1,0 +1,8 @@
+{
+  "name": "LyricsFlip Reward #{token_id}",
+  "description": "A LyricsFlip milestone reward.",
+  "image": "https://<host>/images/{token_id}.png",
+  "attributes": [
+    { "trait_type": "Milestone", "value": "FirstWin | Streak5 | TenWins" }
+  ]
+}

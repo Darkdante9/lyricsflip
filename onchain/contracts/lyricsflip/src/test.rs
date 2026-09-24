@@ -6,8 +6,8 @@
 //! `onchain/` before relying on them.
 
 use crate::{
-    Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, Milestone, Role, RoundCancelled,
-    RoundCompleted, RoundLeft, CARD_ANSWER_WINDOW_SECONDS, DEFAULT_MAX_PLAYERS,
+    Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, Milestone, Role, RoleUpdated,
+    RoundCancelled, RoundCompleted, RoundLeft, CARD_ANSWER_WINDOW_SECONDS, DEFAULT_MAX_PLAYERS,
     LOBBY_TIMEOUT_SECONDS, MAX_PAGE_LIMIT,
 };
 use soroban_sdk::{
@@ -631,6 +631,7 @@ fn error_codes_are_stable() {
         (Error::NftContractNotSet, 23),
         (Error::MilestoneNotReached, 24),
         (Error::MilestoneAlreadyClaimed, 25),
+        (Error::NotPendingOwner, 26),
     ];
     for (variant, code) in expected {
         assert_eq!(variant as u32, code, "{:?} was renumbered", variant);
@@ -830,4 +831,97 @@ fn winner_claims_nft_reward_via_cross_contract_mint() {
         Err(Ok(Error::MilestoneAlreadyClaimed.into()))
     );
     assert_eq!(nft.token_count(), 1);
+}
+
+#[test]
+fn owner_can_still_set_roles_after_revoking_own_admin() {
+    let (env, client, owner) = setup();
+    let other = Address::generate(&env);
+
+    client.set_role(&owner, &owner, &Role::Admin, &false);
+    assert!(!client.is_admin(&Role::Admin, &owner));
+
+    client.set_role(&owner, &other, &Role::Admin, &true);
+    client.set_role(&owner, &owner, &Role::Admin, &true);
+    assert!(client.is_admin(&Role::Admin, &other));
+    assert!(client.is_admin(&Role::Admin, &owner));
+}
+
+#[test]
+fn set_role_emits_role_updated() {
+    let (env, client, owner) = setup();
+    let other = Address::generate(&env);
+    client.set_role(&owner, &other, &Role::Admin, &true);
+    let expected = RoleUpdated {
+        address: other,
+        role: Role::Admin,
+        enabled: true,
+    }
+    .to_xdr(&env, &client.address);
+    assert!(env
+        .events()
+        .all()
+        .filter_by_contract(&client.address)
+        .events()
+        .contains(&expected));
+}
+
+#[test]
+fn ownership_transfer_end_to_end() {
+    let (env, client, owner) = setup();
+    let new_owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    assert_eq!(
+        client.try_transfer_ownership(&stranger, &new_owner),
+        Err(Ok(Error::NotAuthorized.into()))
+    );
+    client.transfer_ownership(&owner, &new_owner);
+    assert_eq!(client.pending_owner(), Some(new_owner.clone()));
+    assert_eq!(
+        client.try_accept_ownership(&stranger),
+        Err(Ok(Error::NotPendingOwner.into()))
+    );
+
+    client.accept_ownership(&new_owner);
+    assert_eq!(client.owner(), new_owner);
+    assert_eq!(client.pending_owner(), None);
+    assert!(client.is_admin(&Role::Admin, &new_owner));
+    assert_eq!(
+        client.try_set_role(&owner, &stranger, &Role::Admin, &true),
+        Err(Ok(Error::NotAuthorized.into()))
+    );
+    client.set_role(&new_owner, &stranger, &Role::Admin, &true);
+}
+
+#[test]
+fn upgrade_keeps_state_and_changes_version() {
+    let (env, client, owner) = setup();
+    let other = Address::generate(&env);
+    client.set_role(&owner, &other, &Role::Admin, &true);
+    assert_eq!(client.version(), 1);
+
+    let hash = env
+        .deployer()
+        .upload_contract_wasm(include_bytes!("../../../fixtures/upgrade_v2.wasm").as_slice());
+    assert_eq!(
+        client.try_upgrade(&other, &hash),
+        Err(Ok(Error::NotAuthorized.into()))
+    );
+    client.upgrade(&owner, &hash);
+
+    assert_eq!(client.version(), 2);
+    env.as_contract(&client.address, || {
+        let stored: Address = env
+            .storage()
+            .instance()
+            .get(&crate::DataKey::Owner)
+            .unwrap();
+        assert_eq!(stored, owner);
+        assert!(env
+            .storage()
+            .instance()
+            .get::<_, bool>(&crate::DataKey::Admin(other.clone()))
+            .unwrap());
+    });
 }

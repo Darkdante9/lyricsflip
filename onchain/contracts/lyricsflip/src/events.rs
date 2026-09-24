@@ -1,6 +1,6 @@
 use soroban_sdk::{contractevent, Address, Map, Vec};
 
-use crate::types::Milestone;
+use crate::types::{Milestone, Role};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,4 +80,31 @@ pub struct RewardClaimed {
     pub player: Address,
     pub milestone: Milestone,
     pub token_id: u128,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RoleUpdated {
+    #[topic]
+    pub address: Address,
+    pub role: Role,
+    pub enabled: bool,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipTransferStarted {
+    #[topic]
+    pub owner: Address,
+    #[topic]
+    pub pending_owner: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnershipTransferred {
+    #[topic]
+    pub old_owner: Address,
+    #[topic]
+    pub new_owner: Address,
 }

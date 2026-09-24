@@ -79,6 +79,9 @@ fn error_codes_are_stable() {
         (Error::IncorrectOwner, 5),
         (Error::InsufficientApproval, 6),
         (Error::InvalidLiveUntilLedger, 7),
+        (Error::NotOwner, 8),
+        (Error::NotPendingOwner, 9),
+        (Error::BaseUriTooLong, 10),
     ];
     for (variant, code) in expected {
         assert_eq!(variant as u32, code, "{:?} was renumbered", variant);
@@ -165,4 +168,106 @@ fn approval_by_non_owner_is_rejected() {
 
     let result = client.try_approve(&mallory, &mallory, &token_id, &1000);
     assert_eq!(result, Err(Ok(Error::InsufficientApproval.into())));
+}
+
+#[test]
+fn token_uri_appends_token_id_to_base_uri() {
+    let (env, client, _owner, minter) = setup();
+    let recipient = Address::generate(&env);
+    client.mint(&minter, &recipient);
+
+    assert_eq!(
+        client.token_uri(&1),
+        String::from_str(&env, "https://example.com/metadata/1")
+    );
+}
+
+#[test]
+fn token_uri_of_missing_token_fails() {
+    let (_env, client, _owner, _minter) = setup();
+    assert_eq!(
+        client.try_token_uri(&1),
+        Err(Ok(Error::TokenDoesNotExist.into()))
+    );
+}
+
+#[test]
+fn owner_can_set_base_uri_and_non_owner_cannot() {
+    let (env, client, owner, minter) = setup();
+    let recipient = Address::generate(&env);
+    client.mint(&minter, &recipient);
+
+    let new_uri = String::from_str(&env, "ipfs://cid/");
+    assert_eq!(
+        client.try_set_base_uri(&minter, &new_uri),
+        Err(Ok(Error::NotOwner.into()))
+    );
+    client.set_base_uri(&owner, &new_uri);
+    assert_eq!(client.token_uri(&1), String::from_str(&env, "ipfs://cid/1"));
+}
+
+#[test]
+fn owner_can_rotate_minter_and_old_minter_cannot_mint() {
+    let (env, client, owner, minter) = setup();
+    let new_minter = Address::generate(&env);
+    let recipient = Address::generate(&env);
+
+    assert_eq!(
+        client.try_set_minter(&minter, &new_minter),
+        Err(Ok(Error::NotOwner.into()))
+    );
+    client.set_minter(&owner, &new_minter);
+    assert_eq!(client.minter(), new_minter);
+    assert_eq!(
+        client.try_mint(&minter, &recipient),
+        Err(Ok(Error::NotMinter.into()))
+    );
+    assert_eq!(client.mint(&new_minter, &recipient), 1);
+}
+
+#[test]
+fn ownership_transfer_is_two_step() {
+    let (env, client, owner, _minter) = setup();
+    let new_owner = Address::generate(&env);
+    let stranger = Address::generate(&env);
+
+    client.transfer_ownership(&owner, &new_owner);
+    assert_eq!(client.owner(), owner);
+    assert_eq!(
+        client.try_accept_ownership(&stranger),
+        Err(Ok(Error::NotPendingOwner.into()))
+    );
+    client.accept_ownership(&new_owner);
+    assert_eq!(client.owner(), new_owner);
+    assert_eq!(client.pending_owner(), None);
+    assert_eq!(
+        client.try_set_minter(&owner, &stranger),
+        Err(Ok(Error::NotOwner.into()))
+    );
+}
+
+#[test]
+fn upgrade_keeps_state_and_changes_version() {
+    let (env, client, owner, minter) = setup();
+    let recipient = Address::generate(&env);
+    client.mint(&minter, &recipient);
+    assert_eq!(client.version(), 1);
+
+    let hash = env
+        .deployer()
+        .upload_contract_wasm(include_bytes!("../../../fixtures/upgrade_v2.wasm").as_slice());
+    assert_eq!(
+        client.try_upgrade(&minter, &hash),
+        Err(Ok(Error::NotOwner.into()))
+    );
+    client.upgrade(&owner, &hash);
+
+    assert_eq!(client.version(), 2);
+    let stored_owner: Address = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&crate::DataKey::TokenOwner(1))
+            .unwrap()
+    });
+    assert_eq!(stored_owner, recipient);
 }
