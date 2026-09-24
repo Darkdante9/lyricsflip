@@ -5,20 +5,21 @@ mod events;
 mod types;
 
 #[cfg(test)]
+mod budget_thresholds;
+#[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
 
 pub use errors::Error;
 pub use events::{
     AnswerSubmitted, CardAdded, CardDrawn, CardRemoved, CardUpdated, CardsPerRoundUpdated,
-    PlayerReady, RoleUpdated, RoundCompleted, RoundCreated, RoundJoined, RoundStarted,
-};
-pub use types::{Answer, Card, CardPos, DataKey, Genre, PlayerStats, QuestionCard, Role, Round};
-
-use soroban_sdk::{
-    contract, contractimpl, panic_with_error, Address, Bytes, BytesN, Env, Map, String, Vec,
     OwnershipTransferStarted, OwnershipTransferred, PlayerReady, RewardClaimed, RoleUpdated,
     RoundCancelled, RoundCompleted, RoundCreated, RoundJoined, RoundLeft, RoundStarted,
 };
+pub use types::{
+    Answer, Card, CardPos, DataKey, Genre, Milestone, PlayerStats, QuestionCard, QuestionKind,
+    Role, Round,
 pub use types::{Answer, Card, DataKey, Genre, Milestone, PlayerStats, QuestionCard, Role, Round};
 pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
 pub use types::{
@@ -42,6 +43,11 @@ pub const DEFAULT_MAX_PLAYERS: u32 = 8;
 /// rule). Answers submitted after the window are accepted but scored as
 /// wrong, so every player can still complete the round.
 pub const CARD_ANSWER_WINDOW_SECONDS: u64 = 15;
+/// Points for an instant correct answer; each elapsed second costs
+/// `POINTS_DECAY_PER_SECOND`, down to `MIN_CORRECT_POINTS`.
+pub const MAX_CORRECT_POINTS: u64 = 100;
+pub const POINTS_DECAY_PER_SECOND: u64 = 5;
+pub const MIN_CORRECT_POINTS: u64 = 10;
 
 /// Seconds after creation after which anyone may cancel a round that never
 /// started.
@@ -58,6 +64,42 @@ pub trait NftInterface {
 /// `get_open_rounds`). Larger `limit` values are clamped to this.
 pub const MAX_PAGE_LIMIT: u32 = 50;
 
+// ---------------------------------------------------------------------------
+// LF-012 – TTL policy
+//
+// Soroban persistent and instance entries are archived when their TTL expires.
+// We extend TTLs on every write (and on reads for hot keys) so that active
+// game data stays available on testnet / mainnet.
+//
+// Ledger cadence on Stellar mainnet ≈ 5 s, so:
+//   DAY_IN_LEDGERS  ≈ 17 280 ledgers/day
+//   BUMP_AMOUNT     = 30 days of ledgers
+//   LIFETIME_THRESHOLD = 7 days — extend only when less than this remains,
+//                        avoiding a per-call extend when lots of TTL is left.
+// ---------------------------------------------------------------------------
+pub const DAY_IN_LEDGERS: u32 = 17_280;
+pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS; // ~30 days
+pub const LIFETIME_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS; // ~7 days
+
+/// Extend instance storage TTL (owner, admin map, counters, config).
+#[inline]
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Extend a single persistent storage entry by key.
+#[inline]
+fn bump_persistent<K>(env: &Env, key: &K)
+where
+    K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+    soroban_sdk::Val: soroban_sdk::TryFromVal<Env, K>,
+{
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
 /// Upper bound on the number of candidate cards inspected per fallback attempt
 /// when building a question card. `build_question_card` never asks
 /// `get_random_numbers` for more ids than `min(10, cards_count)`, so small
@@ -272,21 +314,13 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::RoundFinalized(round_id), &true);
+        bump_persistent(&env, &DataKey::RoundFinalized(round_id));
+        bump_instance(&env);
     }
 
     /// Number of live (added and not removed) cards.
     pub fn get_cards_count(env: Env) -> u64 {
         Self::index_len(&env, &Index::All) as u64
-        bump_persistent(&env, &DataKey::RoundFinalized(round_id));
-        bump_instance(&env);
-    }
-
-    pub fn get_cards_count(env: Env) -> u64 {
-        bump_instance(&env);
-        env.storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0)
     }
 
     pub fn get_round_count(env: Env) -> u64 {
@@ -377,69 +411,6 @@ impl LyricsFlip {
 
     pub fn get_cards_of_a_year(env: Env, year: u64, seed: u64) -> Vec<Card> {
         Self::draw_cards(&env, &Index::Year(year), seed, Error::EmptyYearCards)
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::GenreCards(genre))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::EmptyGenreCards);
-        }
-        bump_persistent(&env, &DataKey::GenreCards(genre));
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
-    }
-
-    pub fn get_cards_of_artist(env: Env, artist: String, seed: u64) -> Vec<Card> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ArtistCards(artist.clone()))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::ArtistCardsIsZero);
-        }
-        bump_persistent(&env, &DataKey::ArtistCards(artist));
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
-    }
-
-    pub fn get_cards_of_a_year(env: Env, year: u64, seed: u64) -> Vec<Card> {
-        let ids: Vec<u64> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::YearCards(year))
-            .unwrap_or(Vec::new(&env));
-        let limit = ids.len() as u64;
-        if limit == 0 {
-            panic_with_error!(env, Error::EmptyYearCards);
-        }
-        bump_persistent(&env, &DataKey::YearCards(year));
-        let amount = Self::get_cards_per_round(env.clone()) as u64;
-        let indices = Self::get_random_numbers(&env, seed, amount, limit, true);
-
-        let mut cards: Vec<Card> = Vec::new(&env);
-        for idx in indices.iter() {
-            let card_id = ids.get(idx as u32).unwrap();
-            cards.push_back(Self::get_card(env.clone(), card_id));
-        }
-        cards
     }
 
     pub fn get_player_stat(env: Env, player: Address) -> PlayerStats {
@@ -613,12 +584,6 @@ impl LyricsFlip {
             bump_persistent(&env, &DataKey::Round(round_id));
 
             Self::remove_open_round(&env, round_id);
-            let mut open = Self::read_open_rounds(&env);
-            if let Some(idx) = open.first_index_of(round_id) {
-                open.remove(idx);
-                env.storage().persistent().set(&DataKey::OpenRounds, &open);
-                bump_persistent(&env, &DataKey::OpenRounds);
-            }
 
             bump_instance(&env);
 
@@ -646,7 +611,6 @@ impl LyricsFlip {
         }
 
         let mut players = Self::read_round_players(&env, round_id);
-        if players.len() >= MAX_ROUND_PLAYERS {
         if players.len() >= Self::get_max_players(env.clone()) {
             panic_with_error!(env, Error::RoundFull);
         }
@@ -795,8 +759,8 @@ impl LyricsFlip {
         env.storage()
             .instance()
             .set(&DataKey::CardsPerRound, &value);
-        CardsPerRoundUpdated { value }.publish(&env);
         bump_instance(&env);
+        CardsPerRoundUpdated { value }.publish(&env);
     }
 
     /// Adds a card and returns its id. The `card_id` field of `card` is
@@ -848,8 +812,6 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .remove(&DataKey::CardKey(Self::card_key(&env, &old)));
-            .set(&DataKey::ArtistCards(card.artist.clone()), &artist_cards);
-        bump_persistent(&env, &DataKey::ArtistCards(card.artist.clone()));
 
         let card = Card { card_id, ..card };
         for index in Index::of(&card).iter().skip(1) {
@@ -859,11 +821,6 @@ impl LyricsFlip {
             .persistent()
             .set(&DataKey::CardPos(card_id), &pos);
         env.storage()
-            .set(&DataKey::GenreCards(card.genre), &genre_cards);
-        bump_persistent(&env, &DataKey::GenreCards(card.genre));
-
-        let mut year_cards: Vec<u64> = env
-            .storage()
             .persistent()
             .set(&DataKey::CardKey(new_key), &card_id);
         env.storage()
@@ -882,8 +839,6 @@ impl LyricsFlip {
         caller.require_auth();
         Self::assert_admin(&env, &caller);
         let card = Self::get_card(env.clone(), card_id);
-            .set(&DataKey::YearCards(card.year), &year_cards);
-        bump_persistent(&env, &DataKey::YearCards(card.year));
 
         let mut pos = Self::read_card_pos(&env, card_id);
         for index in Index::of(&card).iter() {
@@ -898,11 +853,6 @@ impl LyricsFlip {
         env.storage().persistent().remove(&DataKey::Card(card_id));
 
         CardRemoved { card_id }.publish(&env);
-            .set(&DataKey::Card(card_id), &card);
-        bump_persistent(&env, &DataKey::Card(card_id));
-
-        env.storage().instance().set(&DataKey::CardsCount, &card_id);
-        bump_instance(&env);
     }
 
     /// Owner-only. The owner may manage roles even after revoking their own
@@ -914,9 +864,9 @@ impl LyricsFlip {
         env.storage()
             .instance()
             .set(&DataKey::Admin(recipient.clone()), &is_enable);
+        bump_instance(&env);
         RoleUpdated {
             account: recipient,
-            address: recipient,
             role,
             enabled: is_enable,
         }
@@ -976,8 +926,6 @@ impl LyricsFlip {
         caller.require_auth();
         Self::assert_owner(&env, &caller);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
-            .set(&DataKey::Admin(recipient), &is_enable);
-        bump_instance(&env);
     }
 
     pub fn submit_answer(env: Env, caller: Address, round_id: u64, answer: Answer) -> bool {
@@ -1046,10 +994,18 @@ impl LyricsFlip {
                 Answer::Title(value) => value == current_card.title,
             };
 
+        let points = if is_answer_correct {
+            MAX_CORRECT_POINTS
+                .saturating_sub(answer_time.saturating_mul(POINTS_DECAY_PER_SECOND))
+                .max(MIN_CORRECT_POINTS)
+        } else {
+            0
+        };
+
         let mut scores = Self::read_round_scores(&env, round_id);
         if is_answer_correct {
             let score = scores.get(caller.clone()).unwrap_or(0u64);
-            scores.set(caller.clone(), score + 1);
+            scores.set(caller.clone(), score + points);
             env.storage()
                 .persistent()
                 .set(&DataKey::RoundScores(round_id), &scores);
@@ -1068,14 +1024,15 @@ impl LyricsFlip {
         env.storage()
             .persistent()
             .set(&DataKey::PlayerStats(caller.clone()), &stats);
+        bump_persistent(&env, &DataKey::PlayerStats(caller.clone()));
 
         AnswerSubmitted {
             round_id,
             player: caller,
             correct: is_answer_correct,
+            points,
         }
         .publish(&env);
-        bump_persistent(&env, &DataKey::PlayerStats(caller));
 
         is_answer_correct
     }
@@ -1140,18 +1097,13 @@ impl LyricsFlip {
         token_id
     }
 
-    pub fn build_question_card(env: Env, card: Card, seed: u64) -> QuestionCard {
+    pub fn build_question_card(
+        env: Env,
+        card: Card,
+        seed: u64,
+        kind: QuestionKind,
+    ) -> QuestionCard {
         let cards_count = Self::index_len(&env, &Index::All) as u64;
-        let random_idxs = Self::get_random_numbers(&env, seed, 10, cards_count, true);
-
-        let mut false_answers: Vec<String> = Vec::new(&env);
-        for idx in random_idxs.iter() {
-    pub fn build_question_card(env: Env, card: Card, seed: u64, kind: QuestionKind) -> QuestionCard {
-        let cards_count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::CardsCount)
-            .unwrap_or(0);
 
         match kind {
             QuestionKind::Title => Self::build_title_question(&env, card, seed, cards_count),
@@ -1163,6 +1115,11 @@ impl LyricsFlip {
     // ---- build_question_card helpers ----
 
     fn build_title_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_idxs =
+            Self::get_random_numbers(env, seed, cards_count.min(10), cards_count, true);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
+        for idx in random_idxs.iter() {
         let correct = card.title.clone();
         Self::build_options_question(
             env,
@@ -1237,7 +1194,7 @@ impl LyricsFlip {
             if false_answers.len() >= 3 {
                 break;
             }
-            let id = Self::index_get(&env, &Index::All, idx as u32);
+            let id = Self::index_get(env, &Index::All, idx as u32);
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
                 && !Self::contains_string(&false_answers, &candidate.title)
@@ -1251,10 +1208,8 @@ impl LyricsFlip {
 
         let mut extra_seed = seed + 1;
         while false_answers.len() < 3 {
-            let idxs = Self::get_random_numbers(&env, extra_seed, 1, cards_count, true);
-            let id = Self::index_get(&env, &Index::All, idxs.get(0).unwrap() as u32);
-            let ids = Self::get_random_numbers(env, extra_seed, 1, cards_count, false);
-            let id = ids.get(0).unwrap();
+            let idxs = Self::get_random_numbers(env, extra_seed, 1, cards_count, true);
+            let id = Self::index_get(env, &Index::All, idxs.get(0).unwrap() as u32);
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
                 && !Self::contains_string(&false_answers, &candidate.title)
@@ -1283,6 +1238,33 @@ impl LyricsFlip {
         }
     }
 
+    fn build_artist_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_idxs =
+            Self::get_random_numbers(env, seed, cards_count.min(10), cards_count, true);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
+        for idx in random_idxs.iter() {
+            if false_answers.len() >= 3 {
+                break;
+            }
+            let id = Self::index_get(env, &Index::All, idx as u32);
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
+            }
+        }
+
+        let mut extra_seed = seed + 1;
+        while false_answers.len() < 3 {
+            let idxs = Self::get_random_numbers(env, extra_seed, 1, cards_count, true);
+            let id = Self::index_get(env, &Index::All, idxs.get(0).unwrap() as u32);
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
     /// Ordered card ids used to pick distractors for `card`: same-genre cards
     /// (shuffled with `seed`) first so wrong options stay plausible, then every
     /// remaining card (shuffled with a derived seed). Each card appears exactly

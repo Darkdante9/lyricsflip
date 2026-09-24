@@ -26,8 +26,13 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   15: { name: 'AmountExceedsLimit', message: 'Not enough cards to build a round.' },
   16: { name: 'LimitMustBeGreaterThanZero', message: 'No cards have been added yet.' },
   17: { name: 'NonExistingCard', message: 'That card does not exist.' },
+  20: { name: 'RoundCancelled', message: 'That round was cancelled.' },
   20: { name: 'NotEnoughDistinctCards', message: 'Not enough distinct answers to build a question card.' },
   21: { name: 'RoundFull', message: 'That round is full.' },
+  22: { name: 'InvalidMaxPlayers', message: 'A round needs room for at least 2 players.' },
+  23: { name: 'NftContractNotSet', message: 'NFT rewards are not configured yet.' },
+  24: { name: 'MilestoneNotReached', message: 'You have not reached that milestone yet.' },
+  25: { name: 'MilestoneAlreadyClaimed', message: 'You already claimed that reward.' },
   26: { name: 'InvalidCardTitle', message: 'A card needs a title.' },
   27: { name: 'InvalidCardArtist', message: 'A card needs an artist.' },
   28: { name: 'InvalidCardLyrics', message: 'A card needs lyrics.' },
@@ -35,13 +40,7 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   30: { name: 'LyricsTooLong', message: 'The lyrics are too long (max 1000 bytes).' },
   31: { name: 'DuplicateCard', message: 'A card with that title and artist already exists.' },
   32: { name: 'BatchTooLarge', message: 'Too many cards in one batch (max 20).' },
-  20: { name: 'RoundCancelled', message: 'That round was cancelled.' },
-  21: { name: 'RoundFull', message: 'That round is full.' },
-  22: { name: 'InvalidMaxPlayers', message: 'A round needs room for at least 2 players.' },
-  23: { name: 'NftContractNotSet', message: 'NFT rewards are not configured yet.' },
-  24: { name: 'MilestoneNotReached', message: 'You have not reached that milestone yet.' },
-  25: { name: 'MilestoneAlreadyClaimed', message: 'You already claimed that reward.' },
-  26: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
+  33: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
 };
 
 export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {

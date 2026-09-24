@@ -362,14 +362,6 @@ Every variant is currently referenced by the contract. The ones marked
 | 15 | `AmountExceedsLimit` | Asked for more random cards than exist (e.g. cards-per-round larger than the catalogue) |
 | 16 | `LimitMustBeGreaterThanZero` | Random selection over an empty set (no cards added yet) |
 | 17 | `NonExistingCard` | No card with the given id |
-| 21 | `RoundFull` | Round already has `MAX_ROUND_PLAYERS` players |
-| 26 | `InvalidCardTitle` | Card `title` is empty |
-| 27 | `InvalidCardArtist` | Card `artist` is empty |
-| 28 | `InvalidCardLyrics` | Card `lyrics` is empty |
-| 29 | `InvalidCardYear` | Card `year` is before 1900 or after the current year |
-| 30 | `LyricsTooLong` | Card `lyrics` exceed `MAX_LYRICS_LEN` bytes |
-| 31 | `DuplicateCard` | Another card already has this `title` + `artist` |
-| 32 | `BatchTooLarge` | `add_cards` got more than `MAX_CARDS_PER_BATCH` cards |
 | 18 | `RoundNotReady` | `finalize_round` before all answers are in or the deadline has passed |
 | 19 | `RoundAlreadyFinalized` | Round was already finalized |
 | 20 | `RoundCancelled` | Round was cancelled |
@@ -378,6 +370,14 @@ Every variant is currently referenced by the contract. The ones marked
 | 23 | `NftContractNotSet` | `claim_reward` before the owner set the NFT contract |
 | 24 | `MilestoneNotReached` | Player's stats don't meet the milestone yet |
 | 25 | `MilestoneAlreadyClaimed` | Player already claimed that milestone |
+| 26 | `InvalidCardTitle` | Card `title` is empty |
+| 27 | `InvalidCardArtist` | Card `artist` is empty |
+| 28 | `InvalidCardLyrics` | Card `lyrics` is empty |
+| 29 | `InvalidCardYear` | Card `year` is before 1900 or after the current year |
+| 30 | `LyricsTooLong` | Card `lyrics` exceed `MAX_LYRICS_LEN` bytes |
+| 31 | `DuplicateCard` | Another card already has this `title` + `artist` |
+| 32 | `BatchTooLarge` | `add_cards` got more than `MAX_CARDS_PER_BATCH` cards |
+| 33 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
 | 26 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
 | 18 | `RoundNotReady` | `finalize_round` called before all answers submitted and before the deadline |
 | 19 | `RoundAlreadyFinalized` | `finalize_round` called a second time on an already-finalized round |

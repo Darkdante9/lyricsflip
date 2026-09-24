@@ -1,7 +1,5 @@
-use crate::types::{Genre, Role};
+use crate::types::{Genre, Milestone, Role};
 use soroban_sdk::{contractevent, Address, Map, Vec};
-
-use crate::types::{Milestone, Role};
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -54,11 +52,6 @@ pub struct RoundCompleted {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CardAdded {
-    #[topic]
-    pub card_id: u64,
-    #[topic]
-    pub genre: Genre,
 pub struct RoundLeft {
     #[topic]
     pub round_id: u64,
@@ -69,11 +62,15 @@ pub struct RoundLeft {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CardUpdated {
+pub struct CardAdded {
     #[topic]
     pub card_id: u64,
     #[topic]
     pub genre: Genre,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoundCancelled {
     #[topic]
     pub round_id: u64,
@@ -86,9 +83,15 @@ pub struct RoundCancelled {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CardRemoved {
+pub struct CardUpdated {
     #[topic]
     pub card_id: u64,
+    #[topic]
+    pub genre: Genre,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewardClaimed {
     #[topic]
     pub player: Address,
@@ -98,16 +101,18 @@ pub struct RewardClaimed {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardRemoved {
+    #[topic]
+    pub card_id: u64,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardDrawn {
     #[topic]
     pub round_id: u64,
     pub index: u32,
     pub card_id: u64,
-pub struct RoleUpdated {
-    #[topic]
-    pub address: Address,
-    pub role: Role,
-    pub enabled: bool,
 }
 
 #[contractevent]
@@ -118,11 +123,7 @@ pub struct AnswerSubmitted {
     #[topic]
     pub player: Address,
     pub correct: bool,
-pub struct OwnershipTransferStarted {
-    #[topic]
-    pub owner: Address,
-    #[topic]
-    pub pending_owner: Address,
+    pub points: u64,
 }
 
 #[contractevent]
@@ -136,11 +137,24 @@ pub struct RoleUpdated {
 
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct CardsPerRoundUpdated {
-    pub value: u32,
+pub struct OwnershipTransferStarted {
+    #[topic]
+    pub owner: Address,
+    #[topic]
+    pub pending_owner: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OwnershipTransferred {
     #[topic]
     pub old_owner: Address,
     #[topic]
     pub new_owner: Address,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardsPerRoundUpdated {
+    pub value: u32,
 }

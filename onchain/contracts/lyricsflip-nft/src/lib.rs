@@ -152,6 +152,11 @@ fn bump_instance(env: &Env) {
 }
 
 #[inline]
+fn bump_persistent<K>(env: &Env, key: &K)
+where
+    K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+    soroban_sdk::Val: soroban_sdk::TryFromVal<Env, K>,
+{
 fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
     env.storage()
         .persistent()
@@ -214,9 +219,9 @@ impl LyricsFlipNFT {
         env.storage()
             .persistent()
             .set(&DataKey::TokenOwner(token_id), &recipient);
-        Self::add_balance(&env, &recipient, 1);
         bump_persistent(&env, &DataKey::TokenOwner(token_id));
 
+        Self::add_balance(&env, &recipient, 1);
         env.storage()
             .instance()
             .set(&DataKey::TokenCount, &token_id);
