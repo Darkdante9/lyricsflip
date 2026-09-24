@@ -20,6 +20,10 @@ pub use events::{
 pub use types::{
     Answer, Card, CardPos, DataKey, Genre, Milestone, PlayerStats, QuestionCard, QuestionKind,
     Role, Round,
+pub use types::{Answer, Card, DataKey, Genre, Milestone, PlayerStats, QuestionCard, Role, Round};
+pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
+pub use types::{
+    Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, QuestionKind, Role, Round,
 };
 
 use soroban_sdk::{
@@ -96,6 +100,11 @@ where
         .persistent()
         .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
+/// Upper bound on the number of candidate cards inspected per fallback attempt
+/// when building a question card. `build_question_card` never asks
+/// `get_random_numbers` for more ids than `min(10, cards_count)`, so small
+/// card sets no longer panic with `AmountExceedsLimit` (LF-010).
+const MAX_DISTRACTOR_SAMPLE: u64 = 10;
 
 /// Maximum number of players in a round. Keeps the `RoundPlayers` vector
 /// (read on every join/answer/finalize) bounded.
@@ -155,6 +164,37 @@ impl Index {
             Index::Year(_) => &mut pos.year,
         }
     }
+// ---------------------------------------------------------------------------
+// LF-012 – TTL policy
+//
+// Soroban persistent and instance entries are archived when their TTL expires.
+// We extend TTLs on every write (and on reads for hot keys) so that active
+// game data stays available on testnet / mainnet.
+//
+// Ledger cadence on Stellar mainnet ≈ 5 s, so:
+//   DAY_IN_LEDGERS  ≈ 17 280 ledgers/day
+//   BUMP_AMOUNT     = 30 days of ledgers
+//   LIFETIME_THRESHOLD = 7 days — extend only when less than this remains,
+//                        avoiding a per-call extend when lots of TTL is left.
+// ---------------------------------------------------------------------------
+pub const DAY_IN_LEDGERS: u32 = 17_280;
+pub const BUMP_AMOUNT: u32 = 30 * DAY_IN_LEDGERS; // ~30 days
+pub const LIFETIME_THRESHOLD: u32 = 7 * DAY_IN_LEDGERS; // ~7 days
+
+/// Extend instance storage TTL (owner, admin map, counters, config).
+#[inline]
+fn bump_instance(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(LIFETIME_THRESHOLD, BUMP_AMOUNT);
+}
+
+/// Extend a single persistent storage entry by key.
+#[inline]
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+    env.storage()
+        .persistent()
+        .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
 }
 
 #[contract]
@@ -898,6 +938,13 @@ impl LyricsFlip {
         if !round.is_started {
             panic_with_error!(env, Error::RoundNotStarted);
         }
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::RoundFinalized(round_id))
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, Error::RoundAlreadyFinalized);
         if round.is_completed || env.ledger().timestamp() >= round.end_time {
             panic_with_error!(env, Error::RoundCompleted);
         }
@@ -990,6 +1037,12 @@ impl LyricsFlip {
         is_answer_correct
     }
 
+    pub fn build_question_card(
+        env: Env,
+        card: Card,
+        seed: u64,
+        kind: QuestionKind,
+    ) -> QuestionCard {
     pub fn set_max_players(env: Env, caller: Address, value: u32) {
         caller.require_auth();
         Self::assert_owner(&env, &caller);
@@ -1067,6 +1120,77 @@ impl LyricsFlip {
 
         let mut false_answers: Vec<String> = Vec::new(env);
         for idx in random_idxs.iter() {
+        let correct = card.title.clone();
+        Self::build_options_question(
+            env,
+            card,
+            seed,
+            cards_count,
+            QuestionKind::Title,
+            correct,
+            |candidate: &Card| candidate.title.clone(),
+        )
+    }
+
+    fn build_artist_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let correct = card.artist.clone();
+        Self::build_options_question(
+            env,
+            card,
+            seed,
+            cards_count,
+            QuestionKind::Artist,
+            correct,
+            |candidate: &Card| candidate.artist.clone(),
+        )
+    }
+
+    /// Builds a multiple-choice card from the correct value plus three distinct
+    /// distractor values drawn from the card catalogue.
+    ///
+    /// LF-010: instead of requesting a fixed 10 random ids (which panics with
+    /// `AmountExceedsLimit` on small catalogues) and reseeding forever until 3
+    /// distinct distractors show up (which burns the whole CPU budget when the
+    /// catalogue has fewer than 4 distinct values), we walk the shuffled
+    /// catalogue in bounded windows:
+    ///
+    /// * Each attempt inspects at most `min(10, cards_count)` candidates.
+    /// * Same-genre cards are consulted first so the wrong options stay
+    ///   plausible (they sound like the correct card).
+    /// * Every card is examined at most once across all attempts, so the loop
+    ///   always terminates; if fewer than 4 distinct values exist in the whole
+    ///   catalogue the call fails with `NotEnoughDistinctCards` instead.
+    fn build_options_question(
+        env: &Env,
+        card: Card,
+        seed: u64,
+        cards_count: u64,
+        kind: QuestionKind,
+        correct: String,
+        get_value: impl Fn(&Card) -> String,
+    ) -> QuestionCard {
+        let candidates = Self::distractor_candidate_ids(env, &card, seed, cards_count);
+        let total = candidates.len() as u64;
+        let sample = core::cmp::min(MAX_DISTRACTOR_SAMPLE, total);
+        let max_attempts = if sample == 0 {
+            0
+        } else {
+            total.div_ceil(sample)
+        };
+
+        let mut false_answers: Vec<String> = Vec::new(env);
+        let mut attempt: u64 = 0;
+        while false_answers.len() < 3 && attempt < max_attempts {
+            let start = attempt * sample;
+            let mut seen: u64 = 0;
+            while false_answers.len() < 3 && seen < sample {
+                let id = candidates.get((start + seen) as u32).unwrap();
+                let value = get_value(&Self::get_card(env.clone(), id));
+                if value != correct && !Self::contains_string(&false_answers, &value) {
+                    false_answers.push_back(value);
+                }
+                seen += 1;
+        for id in random_ids.iter() {
             if false_answers.len() >= 3 {
                 break;
             }
@@ -1077,7 +1201,10 @@ impl LyricsFlip {
             {
                 false_answers.push_back(candidate.title.clone());
             }
+            attempt += 1;
         }
+        if false_answers.len() < 3 {
+            panic_with_error!(env, Error::NotEnoughDistinctCards);
 
         let mut extra_seed = seed + 1;
         while false_answers.len() < 3 {
@@ -1093,7 +1220,7 @@ impl LyricsFlip {
         }
 
         let mut options: Vec<String> = Vec::new(env);
-        options.push_back(card.title.clone());
+        options.push_back(correct);
         for answer in false_answers.iter() {
             options.push_back(answer.clone());
         }
@@ -1103,7 +1230,7 @@ impl LyricsFlip {
         QuestionCard {
             lyric: card.lyrics.clone(),
             timestamp: env.ledger().timestamp(),
-            kind: QuestionKind::Title,
+            kind,
             option_one: shuffled.get(0).unwrap(),
             option_two: shuffled.get(1).unwrap(),
             option_three: shuffled.get(2).unwrap(),
@@ -1138,27 +1265,35 @@ impl LyricsFlip {
                 && !Self::contains_string(&false_answers, &candidate.artist)
             {
                 false_answers.push_back(candidate.artist.clone());
+    /// Ordered card ids used to pick distractors for `card`: same-genre cards
+    /// (shuffled with `seed`) first so wrong options stay plausible, then every
+    /// remaining card (shuffled with a derived seed). Each card appears exactly
+    /// once, so a question can always be answered — or fail with
+    /// `NotEnoughDistinctCards` — without ever looping.
+    fn distractor_candidate_ids(env: &Env, card: &Card, seed: u64, cards_count: u64) -> Vec<u64> {
+        let genre_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GenreCards(card.genre))
+            .unwrap_or(Vec::new(env));
+        let genre_len = genre_ids.len() as u64;
+
+        let mut candidates: Vec<u64> = Vec::new(env);
+
+        if genre_len > 0 {
+            let indices = Self::get_random_numbers(env, seed, genre_len, genre_len, true);
+            for idx in indices.iter() {
+                candidates.push_back(genre_ids.get(idx as u32).unwrap());
             }
-            extra_seed += 1;
         }
 
-        let mut options: Vec<String> = Vec::new(env);
-        options.push_back(card.artist.clone());
-        for answer in false_answers.iter() {
-            options.push_back(answer.clone());
+        let shuffled_all = Self::get_random_numbers(env, seed + 1, cards_count, cards_count, false);
+        for id in shuffled_all.iter() {
+            if !genre_ids.contains(&id) {
+                candidates.push_back(id);
+            }
         }
-
-        let shuffled = Self::shuffle_strings(env, options, seed);
-
-        QuestionCard {
-            lyric: card.lyrics.clone(),
-            timestamp: env.ledger().timestamp(),
-            kind: QuestionKind::Artist,
-            option_one: shuffled.get(0).unwrap(),
-            option_two: shuffled.get(1).unwrap(),
-            option_three: shuffled.get(2).unwrap(),
-            option_four: shuffled.get(3).unwrap(),
-        }
+        candidates
     }
 
     /// Year distractors: pick 6 random offsets in the range [-5, +5] \ {0},

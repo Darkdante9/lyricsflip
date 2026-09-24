@@ -411,7 +411,7 @@ stellar contract invoke --id <LYRICSFLIP_CONTRACT_ID> --source me --network test
   --card '{"card_id":0,"genre":1,"artist":"Demo Artist","title":"Demo Song","year":1999,"lyrics":"Demo lyric line"}'
 ```
 
-> `build_question_card` needs **at least 10 cards** with **at least 4 distinct titles**, and `create_round` needs at least `cards_per_round` cards.
+> `build_question_card` needs **at least 4 distinct titles** (3 wrong options plus the right one); `create_round` needs at least `cards_per_round` cards.
 
 ### 3. Run the frontend
 

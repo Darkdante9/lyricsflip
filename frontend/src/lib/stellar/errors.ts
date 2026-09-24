@@ -27,6 +27,7 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   16: { name: 'LimitMustBeGreaterThanZero', message: 'No cards have been added yet.' },
   17: { name: 'NonExistingCard', message: 'That card does not exist.' },
   20: { name: 'RoundCancelled', message: 'That round was cancelled.' },
+  20: { name: 'NotEnoughDistinctCards', message: 'Not enough distinct answers to build a question card.' },
   21: { name: 'RoundFull', message: 'That round is full.' },
   22: { name: 'InvalidMaxPlayers', message: 'A round needs room for at least 2 players.' },
   23: { name: 'NftContractNotSet', message: 'NFT rewards are not configured yet.' },

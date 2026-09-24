@@ -378,6 +378,10 @@ Every variant is currently referenced by the contract. The ones marked
 | 31 | `DuplicateCard` | Another card already has this `title` + `artist` |
 | 32 | `BatchTooLarge` | `add_cards` got more than `MAX_CARDS_PER_BATCH` cards |
 | 33 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
+| 26 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
+| 18 | `RoundNotReady` | `finalize_round` called before all answers submitted and before the deadline |
+| 19 | `RoundAlreadyFinalized` | `finalize_round` called a second time on an already-finalized round |
+| 20 | `NotEnoughDistinctCards` | `build_question_card` can't find 3 distinct distractors (fewer than 4 distinct values in the catalogue) |
 
 ### `lyricsflip-nft`
 

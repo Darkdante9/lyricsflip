@@ -157,6 +157,7 @@ where
     K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
     soroban_sdk::Val: soroban_sdk::TryFromVal<Env, K>,
 {
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
     env.storage()
         .persistent()
         .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);
