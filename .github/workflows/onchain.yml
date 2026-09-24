@@ -34,3 +34,22 @@ jobs:
           workspaces: onchain
       - run: cargo test
         working-directory: onchain
+
+  bindings-check:
+    name: TypeScript bindings are up to date (LF-032)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32v1-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: onchain
+      - name: Install Stellar CLI
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          cargo install stellar-cli --locked
+        shell: bash
+      - name: Check TypeScript bindings are fresh
+        run: bash onchain/scripts/check-bindings-fresh.sh

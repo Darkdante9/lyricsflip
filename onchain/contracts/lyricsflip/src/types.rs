@@ -84,11 +84,25 @@ pub enum Milestone {
     TenWins = 2,
 }
 
+/// Specifies what the player is asked to identify in a `QuestionCard`.
+/// Using explicit discriminants keeps the on-chain ABI stable and makes the
+/// JS SDK decode to a plain `number` (same encoding rule as `Genre`/`Role`).
+/// Keep `frontend/src/lib/stellar/types.ts`'s `QUESTION_KIND_VALUES` in sync.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QuestionKind {
+    Title = 0,
+    Artist = 1,
+    Year = 2,
+}
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QuestionCard {
     pub lyric: String,
     pub timestamp: u64,
+    /// Which attribute the options represent (Title / Artist / Year).
+    pub kind: QuestionKind,
     pub option_one: String,
     pub option_two: String,
     pub option_three: String,
