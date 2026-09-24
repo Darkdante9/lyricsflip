@@ -164,7 +164,7 @@ export default function MultiplayerPage() {
             <p className="mb-2">Creator: {currentRound.admin}</p>
             <p className="mb-2">Genre: {currentRound.genre}</p>
             <p className="mb-2">
-              State: {currentRound.is_completed ? 'Completed' : currentRound.is_started ? 'Started' : 'Pending'}
+              State: {currentRound.is_cancelled ? 'Cancelled' : currentRound.is_completed ? 'Completed' : currentRound.is_started ? 'Started' : 'Pending'}
             </p>
             <p className="mb-2">Players: {playersCount}</p>
             <p className="mb-2">Wager: {currentRound.wager_amount.toString()}</p>

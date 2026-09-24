@@ -69,6 +69,19 @@ pub struct Round {
     pub is_completed: bool,
     pub end_time: u64,
     pub next_card_index: u32,
+    pub is_cancelled: bool,
+}
+
+/// NFT reward milestones a player can claim once each via `claim_reward`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Milestone {
+    /// At least one round won.
+    FirstWin = 0,
+    /// A streak of at least 5 correct answers.
+    Streak5 = 1,
+    /// At least 10 rounds won.
+    TenWins = 2,
 }
 
 /// Specifies what the player is asked to identify in a `QuestionCard`.
@@ -139,4 +152,12 @@ pub enum DataKey {
     /// Ids of rounds that have been created but not yet started, in creation
     /// order. Backs the multiplayer lobby's `get_open_rounds` view.
     OpenRounds,
+    /// Global cap on players per round (owner-configurable).
+    MaxPlayers,
+    /// Ledger timestamp at which a round was created; drives the lobby timeout.
+    RoundCreatedAt(u64),
+    /// Address of the `lyricsflip-nft` contract used to mint rewards.
+    NftContract,
+    /// Whether a player has already claimed a milestone reward.
+    MilestoneClaimed((Address, Milestone)),
 }
