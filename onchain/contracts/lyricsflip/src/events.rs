@@ -118,6 +118,7 @@ pub struct AnswerSubmitted {
     #[topic]
     pub player: Address,
     pub correct: bool,
+    pub points: u64,
 pub struct OwnershipTransferStarted {
     #[topic]
     pub owner: Address,

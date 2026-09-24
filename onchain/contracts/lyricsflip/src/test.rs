@@ -855,7 +855,8 @@ fn finalize_round_e2e_single_winner_updates_stats_and_scores() {
     ));
 
     let scores = client.get_round_scores(&round_id);
-    assert_eq!(scores.get(owner.clone()).unwrap(), 2u64);
+    // Two correct answers, 5s after each draw: 2 * (100 - 5 * 5).
+    assert_eq!(scores.get(owner.clone()).unwrap(), 150u64);
     assert_eq!(scores.get(player2.clone()).unwrap(), 0u64);
 
     client.finalize_round(&owner, &round_id);
@@ -1675,6 +1676,7 @@ fn admin_and_gameplay_mutations_emit_events() {
             round_id,
             player: owner.clone(),
             correct: true,
+            points: 100,
         },
     );
 #[test]
@@ -2075,4 +2077,40 @@ fn upgrade_keeps_state_and_changes_version() {
             .get::<_, bool>(&crate::DataKey::Admin(other.clone()))
             .unwrap());
     });
+}
+
+#[test]
+fn faster_correct_answers_earn_more_points_and_wrong_answers_earn_zero() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &5u64);
+    let fast = Address::generate(&env);
+    let slow = Address::generate(&env);
+    let wrong = Address::generate(&env);
+    client.join_round(&fast, &round_id);
+    client.join_round(&slow, &round_id);
+    client.join_round(&wrong, &round_id);
+    client.start_round(&owner, &round_id);
+
+    env.ledger().set_timestamp(1_000);
+    let card = client.next_card(&round_id);
+    env.ledger().set_timestamp(1_002);
+    assert!(client.submit_answer(&fast, &round_id, &Answer::Title(card.title.clone())));
+    assert!(!client.submit_answer(
+        &wrong,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "wrong"))
+    ));
+    env.ledger().set_timestamp(1_000 + CARD_ANSWER_WINDOW_SECONDS);
+    assert!(client.submit_answer(&slow, &round_id, &Answer::Title(card.title.clone())));
+
+    let scores = client.get_round_scores(&round_id);
+    let fast_points = scores.get(fast.clone()).unwrap();
+    let slow_points = scores.get(slow.clone()).unwrap();
+    assert_eq!(fast_points, 90);
+    assert_eq!(slow_points, 25);
+    assert!(fast_points > slow_points);
+    assert_eq!(scores.get(wrong.clone()).unwrap(), 0);
 }

@@ -6,6 +6,10 @@ mod types;
 
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod test_budget;
+#[cfg(test)]
+mod budget_thresholds;
 
 pub use errors::Error;
 pub use events::{
@@ -40,6 +44,11 @@ pub const DEFAULT_MAX_PLAYERS: u32 = 8;
 /// rule). Answers submitted after the window are accepted but scored as
 /// wrong, so every player can still complete the round.
 pub const CARD_ANSWER_WINDOW_SECONDS: u64 = 15;
+/// Points for an instant correct answer; each elapsed second costs
+/// `POINTS_DECAY_PER_SECOND`, down to `MIN_CORRECT_POINTS`.
+pub const MAX_CORRECT_POINTS: u64 = 100;
+pub const POINTS_DECAY_PER_SECOND: u64 = 5;
+pub const MIN_CORRECT_POINTS: u64 = 10;
 
 /// Seconds after creation after which anyone may cancel a round that never
 /// started.
@@ -1031,10 +1040,18 @@ impl LyricsFlip {
                 Answer::Title(value) => value == current_card.title,
             };
 
+        let points = if is_answer_correct {
+            MAX_CORRECT_POINTS
+                .saturating_sub(answer_time.saturating_mul(POINTS_DECAY_PER_SECOND))
+                .max(MIN_CORRECT_POINTS)
+        } else {
+            0
+        };
+
         let mut scores = Self::read_round_scores(&env, round_id);
         if is_answer_correct {
             let score = scores.get(caller.clone()).unwrap_or(0u64);
-            scores.set(caller.clone(), score + 1);
+            scores.set(caller.clone(), score + points);
             env.storage()
                 .persistent()
                 .set(&DataKey::RoundScores(round_id), &scores);
@@ -1058,6 +1075,7 @@ impl LyricsFlip {
             round_id,
             player: caller,
             correct: is_answer_correct,
+            points,
         }
         .publish(&env);
         bump_persistent(&env, &DataKey::PlayerStats(caller));
