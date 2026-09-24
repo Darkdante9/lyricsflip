@@ -51,7 +51,48 @@ target/wasm32v1-none/release/lyricsflip.wasm
 target/wasm32v1-none/release/lyricsflip_nft.wasm
 ```
 
-## Deploying (testnet example)
+## Deploy and seed (automated)
+
+Two helper scripts live in `scripts/` and cover the full set-up flow for a
+fresh testnet deployment.
+
+### Prerequisites
+
+1. Stellar CLI installed (`stellar`).
+2. A funded identity called `me` on the target network:
+
+   ```bash
+   stellar keys generate --global me --network testnet --fund
+   ```
+
+3. Rust with the `wasm32v1-none` target (see above).
+4. `jq` installed (required by `seed-cards.sh`).
+
+### `scripts/deploy.sh`
+
+Builds both WASMs, deploys them, wires the NFT minter to the game contract,
+sets `cards_per_round`, and writes the two contract IDs into
+`frontend/.env.local`.
+
+```bash
+cd onchain
+./scripts/deploy.sh testnet   # or mainnet / futurenet
+```
+
+### `scripts/seed-cards.sh`
+
+Reads `seed/cards.json` (≥ 5 cards per genre, using original and
+public-domain lyric snippets) and calls `add_card` for every entry.  Run
+after `deploy.sh` so the contract IDs are already in `frontend/.env.local`.
+
+```bash
+cd onchain
+./scripts/seed-cards.sh testnet
+```
+
+### Manual deployment (alternative)
+
+If you prefer to deploy by hand:
 
 ```bash
 stellar contract deploy \
@@ -165,6 +206,8 @@ Every variant is currently referenced by the contract. The ones marked
 | 15 | `AmountExceedsLimit` | Asked for more random cards than exist (e.g. cards-per-round larger than the catalogue) |
 | 16 | `LimitMustBeGreaterThanZero` | Random selection over an empty set (no cards added yet) |
 | 17 | `NonExistingCard` | No card with the given id |
+| 18 | `RoundNotReady` | `finalize_round` called before all answers submitted and before the deadline |
+| 19 | `RoundAlreadyFinalized` | `finalize_round` called a second time on an already-finalized round |
 
 ### `lyricsflip-nft`
 

@@ -15,12 +15,14 @@ import {
   type Genre,
   type PlayerStats,
   type QuestionCard,
+  type QuestionKind,
   type Round,
   type WireCard,
   type WireRound,
   ROLE_ADMIN,
   genreFromWire,
   genreToWire,
+  questionKindToWire,
 } from './types';
 
 export interface SystemCalls {
@@ -41,7 +43,7 @@ export interface SystemCalls {
   getCardsOfGenre: (genre: Genre, seed?: bigint) => Promise<Card[]>;
   getCardsOfArtist: (artist: string, seed?: bigint) => Promise<Card[]>;
   getCardsOfAYear: (year: bigint | number, seed?: bigint) => Promise<Card[]>;
-  buildQuestionCard: (card: Card, seed?: bigint) => Promise<QuestionCard>;
+  buildQuestionCard: (card: Card, kind: QuestionKind, seed?: bigint) => Promise<QuestionCard>;
   mintNft: (recipient: string) => Promise<bigint>;
   /**
    * `getCategories`, `getSongs`, `getLeaderboard`, and `claimEarnings` were
@@ -102,7 +104,7 @@ type LyricsFlipContract = {
   get_cards_of_genre: (args: { genre: number; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   get_cards_of_artist: (args: { artist: string; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   get_cards_of_a_year: (args: { year: bigint; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
-  build_question_card: (args: { card: WireCard; seed: bigint }) => Promise<contract.AssembledTransaction<QuestionCard>>;
+  build_question_card: (args: { card: WireCard; seed: bigint; kind: number }) => Promise<contract.AssembledTransaction<QuestionCard>>;
 };
 
 type LyricsFlipNftContract = {
@@ -261,9 +263,13 @@ export function createSystemCalls(config: StellarConfig, publicKey: string | nul
       return assembled.result.map(cardFromWire);
     },
 
-    buildQuestionCard: async (card, seed = randomSeed()) => {
+    buildQuestionCard: async (card, kind, seed = randomSeed()) => {
       const client = await getGameClient(config, publicKey);
-      const assembled = await client.build_question_card({ card: cardToWire(card), seed });
+      const assembled = await client.build_question_card({
+        card: cardToWire(card),
+        seed,
+        kind: questionKindToWire(kind),
+      });
       return assembled.result;
     },
 
