@@ -130,6 +130,8 @@ pub enum Role {
 #[derive(Clone)]
 pub enum DataKey {
     Owner,
+    /// Nominated by `transfer_ownership`, pending `accept_ownership`.
+    PendingOwner,
     Admin(Address),
     RoundCount,
     CardsCount,

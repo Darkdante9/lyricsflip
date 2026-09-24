@@ -36,4 +36,5 @@ pub enum Error {
     NftContractNotSet = 23,
     MilestoneNotReached = 24,
     MilestoneAlreadyClaimed = 25,
+    NotPendingOwner = 26,
 }

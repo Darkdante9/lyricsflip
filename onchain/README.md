@@ -100,11 +100,48 @@ library's.
 | `get_approved(token_id) -> Option<Address>` | Current, unexpired token approval |
 | `is_approved_for_all(owner, operator) -> bool` | Whether `operator` is an unexpired operator |
 | `token_name()`, `token_symbol()`, `base_uri()`, `token_count()` | Metadata |
+| `token_uri(token_id) -> String` | `base_uri` followed by the token id; `TokenDoesNotExist` for unminted tokens |
+| `set_base_uri(caller, base_uri)` | Owner-only; at most 200 bytes |
+| `set_minter(caller, new_minter)` | Owner-only; the old minter can no longer mint |
+| `owner()`, `minter()`, `pending_owner()` | Administration views |
+
+Per-token metadata follows the JSON template in `metadata/template.json`, served
+at `<base_uri><token_id>`.
 
 Events: `NftMinted`, `Transfer { from, to, token_id }`,
 `Approve { approver, token_id, approved, live_until_ledger }` and
-`ApproveForAll { owner, operator, live_until_ledger }`. A transfer clears the
-token's approval.
+`ApproveForAll { owner, operator, live_until_ledger }`, `MinterUpdated`. A
+transfer clears the token's approval.
+
+## Ownership, roles and upgrades
+
+Both contracts support a two-step ownership transfer: the owner calls
+`transfer_ownership(caller, new_owner)`, then the new owner calls
+`accept_ownership(caller)` (`OwnershipTransferStarted` / `OwnershipTransferred`
+events; `owner()` and `pending_owner()` views). On `lyricsflip`, the new owner
+is also granted the admin role, and `set_role` is owner-only regardless of the
+owner's own admin flag, so the owner cannot lock themselves out. `set_role`
+emits `RoleUpdated { address, role, enabled }`.
+
+Both contracts expose `version() -> u32` and an owner-only
+`upgrade(caller, new_wasm_hash)` that replaces the code in place and keeps all
+storage (cards, stats, NFTs). Bump `VERSION` in the contract on each release,
+then:
+
+```bash
+cargo build --target wasm32v1-none --release
+HASH=$(stellar contract upload \
+  --wasm target/wasm32v1-none/release/lyricsflip.wasm \
+  --source <OWNER_IDENTITY> --network testnet)
+stellar contract invoke --id <LYRICSFLIP_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> --network testnet \
+  -- upgrade --caller <OWNER_ADDRESS> --new_wasm_hash $HASH
+```
+
+A release that changes the layout of stored data must migrate it; there is no
+storage schema version key yet, so add one alongside the first such change.
+`fixtures/upgrade_v2.wasm` (built from `contracts/upgrade-fixture`) is the
+stand-in new code used by the upgrade tests.
 
 ## Build & test
 
@@ -283,6 +320,7 @@ Every variant is currently referenced by the contract. The ones marked
 | 23 | `NftContractNotSet` | `claim_reward` before the owner set the NFT contract |
 | 24 | `MilestoneNotReached` | Player's stats don't meet the milestone yet |
 | 25 | `MilestoneAlreadyClaimed` | Player already claimed that milestone |
+| 26 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
 | 18 | `RoundNotReady` | `finalize_round` called before all answers submitted and before the deadline |
 | 19 | `RoundAlreadyFinalized` | `finalize_round` called a second time on an already-finalized round |
 
@@ -293,7 +331,10 @@ Every variant is currently referenced by the contract. The ones marked
 | 1 | `AlreadyInitialized` | Constructor ran on an already-initialized contract (*defensive*) |
 | 2 | `NotMinter` | Caller of `mint` is not the configured minter |
 | 3 | `TokenAlreadyExists` | Token id collision on mint (*defensive*) |
-| 4 | `TokenDoesNotExist` | `owner_of` was called for an unminted token |
+| 4 | `TokenDoesNotExist` | `owner_of` or `token_uri` was called for an unminted token |
 | 5 | `IncorrectOwner` | `from` does not own the token being transferred |
 | 6 | `InsufficientApproval` | Spender/approver is neither the owner nor approved |
 | 7 | `InvalidLiveUntilLedger` | Approval expiry is already in the past |
+| 8 | `NotOwner` | Caller of an owner-only function is not the owner |
+| 9 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
+| 10 | `BaseUriTooLong` | `base_uri` is longer than 200 bytes |

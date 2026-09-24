@@ -9,16 +9,20 @@ mod test;
 
 pub use errors::Error;
 pub use events::{
-    PlayerReady, RewardClaimed, RoundCancelled, RoundCompleted, RoundCreated, RoundJoined,
-    RoundLeft, RoundStarted,
+    OwnershipTransferStarted, OwnershipTransferred, PlayerReady, RewardClaimed, RoleUpdated,
+    RoundCancelled, RoundCompleted, RoundCreated, RoundJoined, RoundLeft, RoundStarted,
 };
 pub use types::{Answer, Card, DataKey, Genre, Milestone, PlayerStats, QuestionCard, Role, Round};
 pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
 pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, QuestionKind, Role, Round};
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, panic_with_error, Address, Bytes, Env, Map, String, Vec,
+    contract, contractclient, contractimpl, panic_with_error, Address, Bytes, BytesN, Env, Map,
+    String, Vec,
 };
+
+/// Bumped on every release that changes the contract's code; see `upgrade`.
+pub const VERSION: u32 = 1;
 
 const DEFAULT_ROUND_DURATION_SECONDS: u64 = 300;
 
@@ -757,16 +761,76 @@ impl LyricsFlip {
         bump_instance(&env);
     }
 
+    /// Owner-only. The owner may manage roles even after revoking their own
+    /// admin flag, so they can never lock themselves out.
     pub fn set_role(env: Env, caller: Address, recipient: Address, role: Role, is_enable: bool) {
         caller.require_auth();
-        let owner: Address = env.storage().instance().get(&DataKey::Owner).unwrap();
-        if caller != owner {
-            panic_with_error!(env, Error::NotAuthorized);
-        }
-        Self::assert_admin(&env, &caller);
+        Self::assert_owner(&env, &caller);
         let Role::Admin = role;
         env.storage()
             .instance()
+            .set(&DataKey::Admin(recipient.clone()), &is_enable);
+        RoleUpdated {
+            address: recipient,
+            role,
+            enabled: is_enable,
+        }
+        .publish(&env);
+    }
+
+    pub fn owner(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::Owner).unwrap()
+    }
+
+    pub fn pending_owner(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PendingOwner)
+    }
+
+    pub fn version() -> u32 {
+        VERSION
+    }
+
+    /// Step one of an ownership transfer; `new_owner` must then call
+    /// `accept_ownership`. Calling again replaces the pending owner.
+    pub fn transfer_ownership(env: Env, caller: Address, new_owner: Address) {
+        caller.require_auth();
+        Self::assert_owner(&env, &caller);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingOwner, &new_owner);
+        OwnershipTransferStarted {
+            owner: caller,
+            pending_owner: new_owner,
+        }
+        .publish(&env);
+    }
+
+    /// Completes an ownership transfer and grants the new owner the admin
+    /// role. The previous owner keeps any admin role they had.
+    pub fn accept_ownership(env: Env, caller: Address) {
+        caller.require_auth();
+        if Self::pending_owner(env.clone()) != Some(caller.clone()) {
+            panic_with_error!(env, Error::NotPendingOwner);
+        }
+        let old_owner = Self::owner(env.clone());
+        env.storage().instance().set(&DataKey::Owner, &caller);
+        env.storage().instance().remove(&DataKey::PendingOwner);
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin(caller.clone()), &true);
+        OwnershipTransferred {
+            old_owner,
+            new_owner: caller,
+        }
+        .publish(&env);
+    }
+
+    /// Owner-only. Replaces this contract's code in place, keeping all
+    /// storage.
+    pub fn upgrade(env: Env, caller: Address, new_wasm_hash: BytesN<32>) {
+        caller.require_auth();
+        Self::assert_owner(&env, &caller);
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
             .set(&DataKey::Admin(recipient), &is_enable);
         bump_instance(&env);
     }

@@ -32,6 +32,7 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   23: { name: 'NftContractNotSet', message: 'NFT rewards are not configured yet.' },
   24: { name: 'MilestoneNotReached', message: 'You have not reached that milestone yet.' },
   25: { name: 'MilestoneAlreadyClaimed', message: 'You already claimed that reward.' },
+  26: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
 };
 
 export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {
@@ -42,6 +43,9 @@ export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {
   5: { name: 'IncorrectOwner', message: 'That token is not owned by this account.' },
   6: { name: 'InsufficientApproval', message: 'You are not approved to manage that token.' },
   7: { name: 'InvalidLiveUntilLedger', message: 'That approval expiry is already in the past.' },
+  8: { name: 'NotOwner', message: 'Only the contract owner can do that.' },
+  9: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
+  10: { name: 'BaseUriTooLong', message: 'That base URI is too long.' },
 };
 
 /**
