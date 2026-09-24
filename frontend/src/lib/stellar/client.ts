@@ -44,15 +44,13 @@ export interface SystemCalls {
   getCardsOfGenre: (genre: Genre, seed?: bigint) => Promise<Card[]>;
   getCardsOfArtist: (artist: string, seed?: bigint) => Promise<Card[]>;
   getCardsOfAYear: (year: bigint | number, seed?: bigint) => Promise<Card[]>;
-  buildQuestionCard: (card: Card, seed?: bigint) => Promise<QuestionCard>;
+  buildQuestionCard: (card: Card, kind: QuestionKind, seed?: bigint) => Promise<QuestionCard>;
   /**
    * Mints the NFT for a reached milestone to the connected wallet. The game
    * contract mints via a cross-contract call (it is the NFT minter), so
    * wallets never call the NFT contract's `mint` directly.
    */
   claimReward: (milestone: Milestone) => Promise<bigint>;
-  buildQuestionCard: (card: Card, kind: QuestionKind, seed?: bigint) => Promise<QuestionCard>;
-  mintNft: (recipient: string) => Promise<bigint>;
   /**
    * `getCategories`, `getSongs`, `getLeaderboard`, and `claimEarnings` were
    * already referenced by some UI components on the Starknet/Dojo version of
@@ -112,13 +110,8 @@ type LyricsFlipContract = {
   get_cards_of_genre: (args: { genre: number; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   get_cards_of_artist: (args: { artist: string; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   get_cards_of_a_year: (args: { year: bigint; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
-  build_question_card: (args: { card: WireCard; seed: bigint }) => Promise<contract.AssembledTransaction<QuestionCard>>;
-  claim_reward: (args: { caller: string; milestone: number }) => Promise<contract.AssembledTransaction<bigint>>;
   build_question_card: (args: { card: WireCard; seed: bigint; kind: number }) => Promise<contract.AssembledTransaction<QuestionCard>>;
-};
-
-type LyricsFlipNftContract = {
-  mint: (args: { caller: string; recipient: string }) => Promise<contract.AssembledTransaction<bigint>>;
+  claim_reward: (args: { caller: string; milestone: number }) => Promise<contract.AssembledTransaction<bigint>>;
 };
 
 async function getGameClient(config: StellarConfig, publicKey: string | null) {

@@ -1,14 +1,20 @@
-//! Resource-budget ceilings for `test_budget`. Measured with 500 cards and
-//! 8 players; raise a value only with a matching note in the PR.
+//! Resource-budget ceilings for `test_budget`, measured with a 500-card
+//! catalogue and 8 players (soroban-sdk 27 default budget). Each ceiling is
+//! the measured value plus ~10% headroom; raise one only alongside a note in
+//! the PR explaining the new cost.
 //!
-//! Soroban per-transaction limits are 100M CPU instructions and 40 MiB of
-//! memory, so every ceiling stays well below them.
+//! | Call                          | Measured CPU | Measured memory |
+//! | ----------------------------- | ------------ | --------------- |
+//! | `create_round`                | 20,003,252   | 6,763,970       |
+//! | `start_round` (8th ready-up)  | 36,637,500   | 10,628,309      |
+//! | `build_question_card` (Title) | 4,633,560    | 2,490,833       |
 
-pub const CREATE_ROUND_MAX_CPU: u64 = 40_000_000;
-pub const CREATE_ROUND_MAX_MEM: u64 = 10_000_000;
+pub const CREATE_ROUND_MAX_CPU: u64 = 22_000_000;
+pub const CREATE_ROUND_MAX_MEM: u64 = 7_450_000;
 
-pub const START_ROUND_MAX_CPU: u64 = 20_000_000;
-pub const START_ROUND_MAX_MEM: u64 = 5_000_000;
+pub const START_ROUND_MAX_CPU: u64 = 40_300_000;
+pub const START_ROUND_MAX_MEM: u64 = 11_700_000;
 
-pub const BUILD_QUESTION_CARD_MAX_CPU: u64 = 40_000_000;
-pub const BUILD_QUESTION_CARD_MAX_MEM: u64 = 10_000_000;
+/// Covers every `QuestionKind`; Title is the most expensive.
+pub const BUILD_QUESTION_CARD_MAX_CPU: u64 = 5_100_000;
+pub const BUILD_QUESTION_CARD_MAX_MEM: u64 = 2_750_000;
