@@ -37,6 +37,75 @@ Winner selection follows the LF-005 rule:
 
 `PlayerStats.rounds_won` increments by exactly `1` for every winner when a round is finalized; non-winners and zero-score rounds do not change it. `RoundCompleted { round_id, winners, scores }` emits the finalized round id, the winning addresses, and the final score map for every player in the round.
 
+When a round is finalized it is marked `is_completed`, and `end_time` is set
+to the finalization time, or kept at the deadline if the round timed out.
+
+## Round lifecycle, limits and timing
+
+- **Player cap:** `join_round` fails with `RoundFull` once a round has
+  `get_max_players()` players (default `8`; the owner can change it with
+  `set_max_players(caller, value)`, minimum 2).
+- **Round deadline:** a round's `end_time` is `start_time + 300s`. After it,
+  `submit_answer` fails with `RoundCompleted`, and the round can be finalized.
+- **Card answer window:** players have `CARD_ANSWER_WINDOW_SECONDS` (15s) after
+  `next_card` to answer. **Late answers are accepted but scored as wrong**
+  (they break the streak), so the player still counts as having answered and
+  the round can finalize early.
+- **Leaving:** `leave_round(caller, round_id)` removes a non-admin player
+  before the round starts, clears their ready flag, refunds their wager and
+  emits `RoundLeft { round_id, player, refunded }`.
+- **Cancelling:** `cancel_round(caller, round_id)` works before start. The
+  round admin can call it at any time; anyone else can call it once the lobby
+  has been open for `LOBBY_TIMEOUT_SECONDS` (600s). It sets `is_cancelled`,
+  drops the round from `get_open_rounds`, refunds every player and emits
+  `RoundCancelled { round_id, cancelled_by, refunded_players, refund_per_player }`.
+  A cancelled round can't be joined, started, or finalized (`RoundCancelled`).
+
+Wagers are not escrowed yet (LF-013), so refunds currently report
+`round.wager_amount` without moving tokens. The token transfer goes into
+`refund_wager` once escrow lands.
+
+## NFT rewards
+
+The game contract is the NFT contract's minter. The owner registers the NFT
+contract with `set_nft_contract(caller, nft_contract)`; players then call
+`claim_reward(caller, milestone)`, and the game contract mints through a
+cross-contract call to `mint`. Each milestone can be claimed once per player
+(`MilestoneAlreadyClaimed`); `is_milestone_claimed(player, milestone)` reports
+whether it has been claimed.
+
+| Milestone | Value | Requirement |
+| --- | --- | --- |
+| `FirstWin` | 0 | `rounds_won >= 1` |
+| `Streak5` | 1 | `max_streak >= 5` |
+| `TenWins` | 2 | `rounds_won >= 10` |
+
+### `lyricsflip-nft` interface
+
+The contract follows the [SEP-0050](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0050.md)
+non-fungible interface, with method names and events matching OpenZeppelin's
+`stellar-non-fungible`. It stays hand-written rather than depending on that
+library, to avoid tying the workspace's `soroban-sdk` version to the
+library's.
+
+| Function | Description |
+| --- | --- |
+| `mint(caller, recipient) -> u128` | Minter-only; mints the next token id |
+| `owner_of(token_id) -> Address` | Owner of a token |
+| `balance(owner) -> u32` | Number of tokens held by `owner` |
+| `transfer(from, to, token_id)` | Owner transfers a token (auth: `from`) |
+| `transfer_from(spender, from, to, token_id)` | Approved spender or operator transfers (auth: `spender`) |
+| `approve(approver, approved, token_id, live_until_ledger)` | Owner or operator approves one spender for a token; `0` revokes |
+| `approve_for_all(owner, operator, live_until_ledger)` | Approves an operator for all of `owner`'s tokens; `0` revokes |
+| `get_approved(token_id) -> Option<Address>` | Current, unexpired token approval |
+| `is_approved_for_all(owner, operator) -> bool` | Whether `operator` is an unexpired operator |
+| `token_name()`, `token_symbol()`, `base_uri()`, `token_count()` | Metadata |
+
+Events: `NftMinted`, `Transfer { from, to, token_id }`,
+`Approve { approver, token_id, approved, live_until_ledger }` and
+`ApproveForAll { owner, operator, live_until_ledger }`. A transfer clears the
+token's approval.
+
 ## Build & test
 
 ```bash
@@ -117,6 +186,14 @@ Every variant is currently referenced by the contract. The ones marked
 | 15 | `AmountExceedsLimit` | Asked for more random cards than exist (e.g. cards-per-round larger than the catalogue) |
 | 16 | `LimitMustBeGreaterThanZero` | Random selection over an empty set (no cards added yet) |
 | 17 | `NonExistingCard` | No card with the given id |
+| 18 | `RoundNotReady` | `finalize_round` before all answers are in or the deadline has passed |
+| 19 | `RoundAlreadyFinalized` | Round was already finalized |
+| 20 | `RoundCancelled` | Round was cancelled |
+| 21 | `RoundFull` | Round already has `max_players` players |
+| 22 | `InvalidMaxPlayers` | `set_max_players` was called with a value below 2 |
+| 23 | `NftContractNotSet` | `claim_reward` before the owner set the NFT contract |
+| 24 | `MilestoneNotReached` | Player's stats don't meet the milestone yet |
+| 25 | `MilestoneAlreadyClaimed` | Player already claimed that milestone |
 
 ### `lyricsflip-nft`
 
@@ -126,3 +203,6 @@ Every variant is currently referenced by the contract. The ones marked
 | 2 | `NotMinter` | Caller of `mint` is not the configured minter |
 | 3 | `TokenAlreadyExists` | Token id collision on mint (*defensive*) |
 | 4 | `TokenDoesNotExist` | `owner_of` was called for an unminted token |
+| 5 | `IncorrectOwner` | `from` does not own the token being transferred |
+| 6 | `InsufficientApproval` | Spender/approver is neither the owner nor approved |
+| 7 | `InvalidLiveUntilLedger` | Approval expiry is already in the past |

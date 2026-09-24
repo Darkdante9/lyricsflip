@@ -75,7 +75,12 @@ export interface Round {
   is_completed: boolean;
   end_time: bigint;
   next_card_index: number;
+  is_cancelled: boolean;
 }
+
+/** Mirrors the contract's `Milestone` enum (encoded as a plain `u32`). */
+export const MILESTONES = { FirstWin: 0, Streak5: 1, TenWins: 2 } as const;
+export type Milestone = (typeof MILESTONES)[keyof typeof MILESTONES];
 
 /** Raw shape returned by the contract, before `genreFromWire` is applied. */
 export interface WireRound extends Omit<Round, 'genre'> {

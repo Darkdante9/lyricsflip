@@ -30,4 +30,10 @@ pub enum Error {
     RoundNotReady = 18,
     RoundAlreadyFinalized = 19,
     NonExistingCard = 17,
+    RoundCancelled = 20,
+    RoundFull = 21,
+    InvalidMaxPlayers = 22,
+    NftContractNotSet = 23,
+    MilestoneNotReached = 24,
+    MilestoneAlreadyClaimed = 25,
 }

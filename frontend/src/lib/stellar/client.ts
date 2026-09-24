@@ -13,6 +13,7 @@ import {
   type Answer,
   type Card,
   type Genre,
+  type Milestone,
   type PlayerStats,
   type QuestionCard,
   type Round,
@@ -42,7 +43,12 @@ export interface SystemCalls {
   getCardsOfArtist: (artist: string, seed?: bigint) => Promise<Card[]>;
   getCardsOfAYear: (year: bigint | number, seed?: bigint) => Promise<Card[]>;
   buildQuestionCard: (card: Card, seed?: bigint) => Promise<QuestionCard>;
-  mintNft: (recipient: string) => Promise<bigint>;
+  /**
+   * Mints the NFT for a reached milestone to the connected wallet. The game
+   * contract mints via a cross-contract call (it is the NFT minter), so
+   * wallets never call the NFT contract's `mint` directly.
+   */
+  claimReward: (milestone: Milestone) => Promise<bigint>;
   /**
    * `getCategories`, `getSongs`, `getLeaderboard`, and `claimEarnings` were
    * already referenced by some UI components on the Starknet/Dojo version of
@@ -103,25 +109,12 @@ type LyricsFlipContract = {
   get_cards_of_artist: (args: { artist: string; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   get_cards_of_a_year: (args: { year: bigint; seed: bigint }) => Promise<contract.AssembledTransaction<WireCard[]>>;
   build_question_card: (args: { card: WireCard; seed: bigint }) => Promise<contract.AssembledTransaction<QuestionCard>>;
-};
-
-type LyricsFlipNftContract = {
-  mint: (args: { caller: string; recipient: string }) => Promise<contract.AssembledTransaction<bigint>>;
+  claim_reward: (args: { caller: string; milestone: number }) => Promise<contract.AssembledTransaction<bigint>>;
 };
 
 async function getGameClient(config: StellarConfig, publicKey: string | null) {
   return contract.Client.from<LyricsFlipContract>({
     contractId: config.lyricsflipContractId,
-    networkPassphrase: config.networkPassphrase,
-    rpcUrl: config.rpcUrl,
-    publicKey: publicKey ?? undefined,
-    signTransaction: makeSignTransaction(config.networkPassphrase),
-  });
-}
-
-async function getNftClient(config: StellarConfig, publicKey: string | null) {
-  return contract.Client.from<LyricsFlipNftContract>({
-    contractId: config.lyricsflipNftContractId,
     networkPassphrase: config.networkPassphrase,
     rpcUrl: config.rpcUrl,
     publicKey: publicKey ?? undefined,
@@ -267,10 +260,10 @@ export function createSystemCalls(config: StellarConfig, publicKey: string | nul
       return assembled.result;
     },
 
-    mintNft: async (recipient) => {
+    claimReward: async (milestone) => {
       const caller = requireAccount();
-      const client = await getNftClient(config, caller);
-      return submit(await client.mint({ caller, recipient }));
+      const client = await getGameClient(config, caller);
+      return submit(await client.claim_reward({ caller, milestone }));
     },
 
     getCategories: notImplemented('getCategories'),
