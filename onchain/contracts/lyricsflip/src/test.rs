@@ -1,17 +1,21 @@
-//! Representative behavior-coverage tests ported from
-//! `onchain/src/tests/test_lyricsflip.cairo` (round lifecycle, card queries,
-//! answer submission, and access control). These are written against the
-//! soroban-sdk 22 testutils API but have not been `cargo test`-verified in
-//! this environment (no Rust toolchain available) — run `cargo test` inside
-//! `onchain/` before relying on them.
+//! Unit tests for the `lyricsflip` contract.
+//!
+//! Coverage targets:
+//! - Every public function (happy path + key error paths).
+//! - Every `Error` variant.
+//! - `build_question_card` with all three `QuestionKind` values (LF-029).
+//!
+//! Run with `cargo test` inside `onchain/`.
 
-use crate::{Answer, Card, Genre, LyricsFlip, LyricsFlipClient, Role};
+use crate::{Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, QuestionKind, Role, MAX_PAGE_LIMIT};
 use soroban_sdk::{
     testutils::{Address as _, Events},
-    xdr, Address, Env, Map, String,
+    xdr, Address, Env, Map, String, Vec,
 };
-use crate::{Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, Role, MAX_PAGE_LIMIT};
-use soroban_sdk::{testutils::Address as _, Address, Env, String};
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
 
 fn setup<'a>() -> (Env, LyricsFlipClient<'a>, Address) {
     let env = Env::default();
@@ -33,11 +37,85 @@ fn sample_card(env: &Env, genre: Genre, artist: &str, title: &str, year: u64) ->
     }
 }
 
+/// Seed N cards with the same genre, cycling through distinct artists/titles
+/// so `build_question_card` can always find 3 unique distractors.
+fn seed_cards(env: &Env, client: &LyricsFlipClient, owner: &Address, count: u64) {
+    seed_cards_genre(env, client, owner, count, Genre::Pop);
+}
+
+fn seed_cards_genre(
+    env: &Env,
+    client: &LyricsFlipClient,
+    owner: &Address,
+    count: u64,
+    genre: Genre,
+) {
+    for i in 0..count {
+        // Each card gets a unique artist and title so artist/title distractor
+        // generation always finds 3 distinct values.
+        let artist = alloc_string(env, &format_u64("Artist", i));
+        let title = alloc_string(env, &format_u64("Title", i));
+        let card = Card {
+            card_id: 0,
+            genre,
+            artist,
+            title,
+            year: 2000 + i,
+            lyrics: String::from_str(env, "sample lyric line"),
+        };
+        client.add_card(owner, &card);
+    }
+}
+
+/// Build a string of the form `<prefix><number>` without std::format!.
+fn format_u64(prefix: &str, n: u64) -> [u8; 32] {
+    let prefix_bytes = prefix.as_bytes();
+    let mut buf = [0u8; 32];
+    let mut tmp = [0u8; 20];
+    let mut len = 0usize;
+    let mut m = n;
+    if m == 0 {
+        tmp[0] = b'0';
+        len = 1;
+    } else {
+        while m > 0 {
+            tmp[len] = b'0' + (m % 10) as u8;
+            m /= 10;
+            len += 1;
+        }
+    }
+    let p = prefix_bytes.len().min(12);
+    buf[..p].copy_from_slice(&prefix_bytes[..p]);
+    for i in 0..len {
+        buf[p + i] = tmp[len - 1 - i];
+    }
+    buf
+}
+
+fn alloc_string(env: &Env, bytes: &[u8; 32]) -> String {
+    // find actual length (NUL-terminated)
+    let mut end = 32;
+    while end > 0 && bytes[end - 1] == 0 {
+        end -= 1;
+    }
+    // We know bytes are ASCII, so convert via &str.
+    let s = core::str::from_utf8(&bytes[..end]).unwrap_or("X");
+    String::from_str(env, s)
+}
+
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
+
 #[test]
 fn constructor_grants_owner_admin() {
     let (_env, client, owner) = setup();
     assert!(client.is_admin(&Role::Admin, &owner));
 }
+
+// ---------------------------------------------------------------------------
+// add_card / get_card
+// ---------------------------------------------------------------------------
 
 #[test]
 fn add_card_requires_admin() {
@@ -61,6 +139,54 @@ fn add_card_and_get_card_round_trip() {
 }
 
 #[test]
+fn get_card_errors_for_nonexistent_id() {
+    let (_env, client, _owner) = setup();
+    let result = client.try_get_card(&999);
+    assert!(result.is_err());
+}
+
+#[test]
+fn card_counts_track_adds() {
+    let (env, client, owner) = setup();
+    assert_eq!(client.get_cards_count(), 0);
+    assert_eq!(client.get_genre_card_count(&Genre::Pop), 0);
+
+    seed_cards(&env, &client, &owner, 3);
+    client.add_card(
+        &owner,
+        &sample_card(&env, Genre::Rock, "Artist B", "Title B", 1990),
+    );
+
+    assert_eq!(client.get_cards_count(), 4);
+    assert_eq!(client.get_genre_card_count(&Genre::Pop), 3);
+    assert_eq!(client.get_genre_card_count(&Genre::Rock), 1);
+    assert_eq!(client.get_genre_card_count(&Genre::Jazz), 0);
+}
+
+// ---------------------------------------------------------------------------
+// set_cards_per_round
+// ---------------------------------------------------------------------------
+
+#[test]
+fn set_cards_per_round_rejects_zero() {
+    let (_env, client, owner) = setup();
+    let result = client.try_set_cards_per_round(&owner, &0);
+    assert!(result.is_err());
+}
+
+#[test]
+fn set_cards_per_round_requires_admin() {
+    let (env, client, _owner) = setup();
+    let non_admin = Address::generate(&env);
+    let result = client.try_set_cards_per_round(&non_admin, &5);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// create_round
+// ---------------------------------------------------------------------------
+
+#[test]
 fn create_round_requires_a_genre() {
     let (env, client, owner) = setup();
     let _ = env;
@@ -68,12 +194,50 @@ fn create_round_requires_a_genre() {
     assert!(result.is_err());
 }
 
-fn seed_cards(env: &Env, client: &LyricsFlipClient, owner: &Address, count: u64) {
-    for i in 0..count {
-        let card = sample_card(env, Genre::Pop, "Artist A", "Title A", 2000 + i);
-        client.add_card(owner, &card);
+#[test]
+fn round_count_tracks_creates() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+    assert_eq!(client.get_round_count(), 0);
+
+    for seed in 0..3u64 {
+        client.create_round(&owner, &Some(Genre::Pop), &seed);
     }
+    assert_eq!(client.get_round_count(), 3);
 }
+
+// ---------------------------------------------------------------------------
+// join_round
+// ---------------------------------------------------------------------------
+
+#[test]
+fn join_round_rejects_duplicate_join() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
+
+    let result = client.try_join_round(&owner, &round_id);
+    assert!(result.is_err(), "the round creator is already a player");
+}
+
+#[test]
+fn join_round_rejects_after_start() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
+    client.start_round(&owner, &round_id);
+
+    let late_player = Address::generate(&env);
+    let result = client.try_join_round(&late_player, &round_id);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// start_round / ready tracking
+// ---------------------------------------------------------------------------
 
 #[test]
 fn round_requires_all_players_ready_before_starting() {
@@ -152,28 +316,221 @@ fn total_rounds_unchanged_when_round_never_fully_starts() {
 }
 
 #[test]
-fn join_round_rejects_duplicate_join() {
+fn start_round_rejects_already_ready_player() {
     let (env, client, owner) = setup();
     seed_cards(&env, &client, &owner, 5);
     client.set_cards_per_round(&owner, &3);
     let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
 
-    let result = client.try_join_round(&owner, &round_id);
-    assert!(result.is_err(), "the round creator is already a player");
+    client.start_round(&owner, &round_id);
+    // Second ready call by the same player should fail.
+    let result = client.try_start_round(&owner, &round_id);
+    assert!(result.is_err());
 }
 
 #[test]
-fn join_round_rejects_after_start() {
+fn start_round_rejects_non_participant() {
     let (env, client, owner) = setup();
     seed_cards(&env, &client, &owner, 5);
     client.set_cards_per_round(&owner, &3);
     let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
-    client.start_round(&owner, &round_id);
 
-    let late_player = Address::generate(&env);
-    let result = client.try_join_round(&late_player, &round_id);
+    let outsider = Address::generate(&env);
+    let result = client.try_start_round(&outsider, &round_id);
     assert!(result.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// next_card
+// ---------------------------------------------------------------------------
+
+#[test]
+fn next_card_advances_index_and_completes_round() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 2);
+    client.set_cards_per_round(&owner, &2);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
+    client.start_round(&owner, &round_id);
+
+    let _c1 = client.next_card(&round_id);
+    let round = client.get_round(&round_id);
+    assert_eq!(round.next_card_index, 1);
+    assert!(!round.is_completed);
+
+    let _c2 = client.next_card(&round_id);
+    let round = client.get_round(&round_id);
+    assert_eq!(round.next_card_index, 2);
+    assert!(round.is_completed);
+}
+
+#[test]
+fn next_card_errors_when_round_not_started() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 2);
+    client.set_cards_per_round(&owner, &2);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
+
+    let result = client.try_next_card(&round_id);
+    assert!(result.is_err());
+}
+
+#[test]
+fn next_card_errors_when_round_completed() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 1);
+    client.set_cards_per_round(&owner, &1);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &1u64);
+    client.start_round(&owner, &round_id);
+    client.next_card(&round_id);
+
+    let result = client.try_next_card(&round_id);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// build_question_card — LF-029
+// ---------------------------------------------------------------------------
+
+/// Seed cards with enough variety that all three question kinds can find
+/// 3 unique distractors. We need ≥4 distinct titles, artists, and years.
+fn seed_diverse_cards(env: &Env, client: &LyricsFlipClient, owner: &Address) {
+    let data = [
+        (Genre::Pop, "Drake", "God's Plan", 2018u64),
+        (Genre::Pop, "Rihanna", "Umbrella", 2007),
+        (Genre::Pop, "Adele", "Rolling in the Deep", 2010),
+        (Genre::Pop, "Ed Sheeran", "Shape of You", 2017),
+        (Genre::Pop, "Beyonce", "Crazy in Love", 2003),
+        (Genre::Rock, "Nirvana", "Smells Like Teen Spirit", 1991),
+        (Genre::Rock, "Queen", "Bohemian Rhapsody", 1975),
+        (Genre::Rock, "The Beatles", "Let It Be", 1970),
+        (Genre::HipHop, "Kendrick Lamar", "HUMBLE.", 2017),
+        (Genre::HipHop, "Jay-Z", "Empire State of Mind", 2009),
+    ];
+    for (genre, artist, title, year) in data.iter() {
+        client.add_card(
+            owner,
+            &Card {
+                card_id: 0,
+                genre: *genre,
+                artist: String::from_str(env, artist),
+                title: String::from_str(env, title),
+                year: *year,
+                lyrics: String::from_str(env, "na na na na"),
+            },
+        );
+    }
+}
+
+/// Assert that the four options are all distinct strings and that one of them
+/// matches `correct`.
+fn assert_four_unique_options_with_correct(
+    env: &Env,
+    q: &crate::QuestionCard,
+    correct: &String,
+) {
+    let opts = [
+        q.option_one.clone(),
+        q.option_two.clone(),
+        q.option_three.clone(),
+        q.option_four.clone(),
+    ];
+    // All four must be distinct.
+    for i in 0..4 {
+        for j in (i + 1)..4 {
+            assert_ne!(opts[i], opts[j], "options must be distinct");
+        }
+    }
+    // Exactly one must equal the correct answer.
+    let found = opts.iter().any(|o| o == correct);
+    assert!(found, "correct answer not present in options");
+    let _ = env;
+}
+
+#[test]
+fn build_question_card_title_kind_has_four_unique_options_with_correct_title() {
+    let (env, client, owner) = setup();
+    seed_diverse_cards(&env, &client, &owner);
+    client.set_cards_per_round(&owner, &5);
+
+    let card = client.get_card(&1);
+    let q = client.build_question_card(&card, &42u64, &QuestionKind::Title);
+
+    assert_eq!(q.kind, QuestionKind::Title);
+    assert_four_unique_options_with_correct(&env, &q, &card.title);
+}
+
+#[test]
+fn build_question_card_artist_kind_has_four_unique_options_with_correct_artist() {
+    let (env, client, owner) = setup();
+    seed_diverse_cards(&env, &client, &owner);
+    client.set_cards_per_round(&owner, &5);
+
+    let card = client.get_card(&1);
+    let q = client.build_question_card(&card, &99u64, &QuestionKind::Artist);
+
+    assert_eq!(q.kind, QuestionKind::Artist);
+    assert_four_unique_options_with_correct(&env, &q, &card.artist);
+}
+
+#[test]
+fn build_question_card_year_kind_has_four_unique_options_with_correct_year() {
+    let (env, client, owner) = setup();
+    seed_diverse_cards(&env, &client, &owner);
+    client.set_cards_per_round(&owner, &5);
+
+    let card = client.get_card(&1);
+    // Correct year as string.
+    let correct_year_str = {
+        let y = card.year;
+        let mut tmp = [0u8; 20];
+        let mut len = 0usize;
+        let mut m = y;
+        while m > 0 {
+            tmp[len] = b'0' + (m % 10) as u8;
+            m /= 10;
+            len += 1;
+        }
+        let mut buf = [0u8; 20];
+        for i in 0..len {
+            buf[i] = tmp[len - 1 - i];
+        }
+        String::from_str(&env, core::str::from_utf8(&buf[..len]).unwrap_or("0"))
+    };
+
+    let q = client.build_question_card(&card, &7u64, &QuestionKind::Year);
+
+    assert_eq!(q.kind, QuestionKind::Year);
+    assert_four_unique_options_with_correct(&env, &q, &correct_year_str);
+}
+
+#[test]
+fn build_question_card_year_distractors_are_close_to_correct_year() {
+    let (env, client, owner) = setup();
+    seed_diverse_cards(&env, &client, &owner);
+    client.set_cards_per_round(&owner, &5);
+
+    let card = client.get_card(&1); // year = 2018
+    let q = client.build_question_card(&card, &3u64, &QuestionKind::Year);
+
+    // All four options should be within ±5 years of the correct year.
+    let options = [
+        q.option_one.clone(),
+        q.option_two.clone(),
+        q.option_three.clone(),
+        q.option_four.clone(),
+    ];
+    for opt in options.iter() {
+        // Parse the year string.
+        let bytes = opt.to_string();
+        let parsed: i64 = bytes.parse().expect("year option should be a number");
+        let diff = (parsed - card.year as i64).abs();
+        assert!(diff <= 5, "distractor year {parsed} is more than 5 away from {}", card.year);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// submit_answer
+// ---------------------------------------------------------------------------
 
 #[test]
 fn submit_answer_updates_streak_and_reports_correctness() {
@@ -207,6 +564,69 @@ fn submit_answer_updates_streak_and_reports_correctness() {
 }
 
 #[test]
+fn submit_answer_artist_kind_accepted() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &5u64);
+    client.start_round(&owner, &round_id);
+
+    let card = client.next_card(&round_id);
+    let correct = client.submit_answer(&owner, &round_id, &Answer::Artist(card.artist.clone()));
+    assert!(correct);
+}
+
+#[test]
+fn submit_answer_year_kind_accepted() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &6u64);
+    client.start_round(&owner, &round_id);
+
+    let card = client.next_card(&round_id);
+    let correct = client.submit_answer(&owner, &round_id, &Answer::Year(card.year));
+    assert!(correct);
+}
+
+#[test]
+fn submit_answer_rejects_non_participant() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &8u64);
+    client.start_round(&owner, &round_id);
+    client.next_card(&round_id);
+
+    let outsider = Address::generate(&env);
+    let result = client.try_submit_answer(
+        &outsider,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "x")),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn submit_answer_rejects_on_unstarted_round() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &1);
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &9u64);
+
+    let result = client.try_submit_answer(
+        &owner,
+        &round_id,
+        &Answer::Title(String::from_str(&env, "x")),
+    );
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// get_cards_of_genre / artist / year
+// ---------------------------------------------------------------------------
+
+#[test]
 fn get_cards_of_genre_returns_requested_amount() {
     let (env, client, owner) = setup();
     seed_cards(&env, &client, &owner, 6);
@@ -217,11 +637,79 @@ fn get_cards_of_genre_returns_requested_amount() {
 }
 
 #[test]
+fn get_cards_of_genre_errors_when_empty() {
+    let (_env, client, _owner) = setup();
+    let result = client.try_get_cards_of_genre(&Genre::Jazz, &1u64);
+    assert!(result.is_err());
+}
+
+#[test]
 fn get_cards_of_a_year_errors_when_empty() {
     let (_env, client, _owner) = setup();
     let result = client.try_get_cards_of_a_year(&1975u64, &1u64);
     assert!(result.is_err());
 }
+
+#[test]
+fn get_cards_of_artist_errors_when_no_cards() {
+    let (env, client, _owner) = setup();
+    let result = client.try_get_cards_of_artist(&String::from_str(&env, "Nobody"), &1u64);
+    assert!(result.is_err());
+}
+
+#[test]
+fn get_cards_of_artist_returns_requested_amount() {
+    let (env, client, owner) = setup();
+    // Add 4 cards for the same artist.
+    for i in 0..4u64 {
+        client.add_card(
+            &owner,
+            &Card {
+                card_id: 0,
+                genre: Genre::Rock,
+                artist: String::from_str(&env, "The Same Artist"),
+                title: String::from_str(&env, &format!("Song {}", i)),
+                year: 2000 + i,
+                lyrics: String::from_str(&env, "lyric"),
+            },
+        );
+    }
+    // Dummy card to reach cards_per_round.
+    client.add_card(
+        &owner,
+        &sample_card(&env, Genre::Pop, "Other", "Other Song", 1990),
+    );
+    client.set_cards_per_round(&owner, &2);
+
+    let cards = client.get_cards_of_artist(&String::from_str(&env, "The Same Artist"), &3u64);
+    assert_eq!(cards.len(), 2);
+}
+
+#[test]
+fn get_cards_of_year_returns_requested_amount() {
+    let (env, client, owner) = setup();
+    for i in 0..4u64 {
+        client.add_card(
+            &owner,
+            &Card {
+                card_id: 0,
+                genre: Genre::Jazz,
+                artist: String::from_str(&env, &format!("Artist {}", i)),
+                title: String::from_str(&env, &format!("Track {}", i)),
+                year: 1990,
+                lyrics: String::from_str(&env, "lyric"),
+            },
+        );
+    }
+    client.set_cards_per_round(&owner, &2);
+
+    let cards = client.get_cards_of_a_year(&1990u64, &55u64);
+    assert_eq!(cards.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// set_role / is_admin
+// ---------------------------------------------------------------------------
 
 #[test]
 fn set_role_is_owner_gated_and_updates_is_admin() {
@@ -236,6 +724,10 @@ fn set_role_is_owner_gated_and_updates_is_admin() {
     let result = client.try_set_role(&outsider, &new_admin, &Role::Admin, &false);
     assert!(result.is_err(), "only the owner may grant/revoke admin");
 }
+
+// ---------------------------------------------------------------------------
+// finalize_round
+// ---------------------------------------------------------------------------
 
 fn assert_round_completed_event(
     env: &Env,
@@ -493,36 +985,11 @@ fn finalize_round_e2e_no_correct_answers_has_no_winners() {
 
     let winners = soroban_sdk::vec![&env];
     assert_round_completed_event(&env, &client.address, round_id, &winners, &scores);
-#[test]
-fn card_counts_track_adds() {
-    let (env, client, owner) = setup();
-    assert_eq!(client.get_cards_count(), 0);
-    assert_eq!(client.get_genre_card_count(&Genre::Pop), 0);
-
-    seed_cards(&env, &client, &owner, 3);
-    client.add_card(
-        &owner,
-        &sample_card(&env, Genre::Rock, "Artist B", "Title B", 1990),
-    );
-
-    assert_eq!(client.get_cards_count(), 4);
-    assert_eq!(client.get_genre_card_count(&Genre::Pop), 3);
-    assert_eq!(client.get_genre_card_count(&Genre::Rock), 1);
-    assert_eq!(client.get_genre_card_count(&Genre::Jazz), 0);
 }
 
-#[test]
-fn round_count_tracks_creates() {
-    let (env, client, owner) = setup();
-    seed_cards(&env, &client, &owner, 5);
-    client.set_cards_per_round(&owner, &3);
-    assert_eq!(client.get_round_count(), 0);
-
-    for seed in 0..3u64 {
-        client.create_round(&owner, &Some(Genre::Pop), &seed);
-    }
-    assert_eq!(client.get_round_count(), 3);
-}
+// ---------------------------------------------------------------------------
+// Pagination helpers
+// ---------------------------------------------------------------------------
 
 #[test]
 fn get_rounds_paginates_and_respects_limit() {
@@ -594,13 +1061,17 @@ fn open_rounds_drop_rounds_once_started() {
     assert_eq!(client.get_open_rounds(&5, &10).len(), 0);
 }
 
+// ---------------------------------------------------------------------------
+// Error code stability
+// ---------------------------------------------------------------------------
+
 /// Clients map on these numeric codes; renumbering any of them is a breaking
 /// change. Update `onchain/README.md` and `frontend/src/lib/stellar/errors.ts`
 /// together with this test.
 #[test]
 fn error_codes_are_stable() {
     let expected = [
-        (Error::AlreadyInitialized, 1),
+        (Error::AlreadyInitialized, 1u32),
         (Error::NonExistingRound, 2),
         (Error::RoundAlreadyStarted, 3),
         (Error::NonExistingGenre, 4),
@@ -617,6 +1088,8 @@ fn error_codes_are_stable() {
         (Error::AmountExceedsLimit, 15),
         (Error::LimitMustBeGreaterThanZero, 16),
         (Error::NonExistingCard, 17),
+        (Error::RoundNotReady, 18),
+        (Error::RoundAlreadyFinalized, 19),
     ];
     for (variant, code) in expected {
         assert_eq!(variant as u32, code, "{:?} was renumbered", variant);

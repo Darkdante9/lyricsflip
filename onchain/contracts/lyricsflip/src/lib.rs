@@ -9,7 +9,7 @@ mod test;
 
 pub use errors::Error;
 pub use events::{PlayerReady, RoundCompleted, RoundCreated, RoundJoined, RoundStarted};
-pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, Role, Round};
+pub use types::{Answer, Card, DataKey, Genre, PlayerStats, QuestionCard, QuestionKind, Role, Round};
 
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, Address, Bytes, Env, Map, String, Vec,
@@ -604,15 +604,26 @@ impl LyricsFlip {
         is_answer_correct
     }
 
-    pub fn build_question_card(env: Env, card: Card, seed: u64) -> QuestionCard {
+    pub fn build_question_card(env: Env, card: Card, seed: u64, kind: QuestionKind) -> QuestionCard {
         let cards_count: u64 = env
             .storage()
             .instance()
             .get(&DataKey::CardsCount)
             .unwrap_or(0);
-        let random_ids = Self::get_random_numbers(&env, seed, 10, cards_count, false);
 
-        let mut false_answers: Vec<String> = Vec::new(&env);
+        match kind {
+            QuestionKind::Title => Self::build_title_question(&env, card, seed, cards_count),
+            QuestionKind::Artist => Self::build_artist_question(&env, card, seed, cards_count),
+            QuestionKind::Year => Self::build_year_question(&env, card, seed),
+        }
+    }
+
+    // ---- build_question_card helpers ----
+
+    fn build_title_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_ids = Self::get_random_numbers(env, seed, 10, cards_count, false);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
         for id in random_ids.iter() {
             if false_answers.len() >= 3 {
                 break;
@@ -627,7 +638,7 @@ impl LyricsFlip {
 
         let mut extra_seed = seed + 1;
         while false_answers.len() < 3 {
-            let ids = Self::get_random_numbers(&env, extra_seed, 1, cards_count, false);
+            let ids = Self::get_random_numbers(env, extra_seed, 1, cards_count, false);
             let id = ids.get(0).unwrap();
             let candidate = Self::get_card(env.clone(), id);
             if candidate.title != card.title
@@ -638,17 +649,120 @@ impl LyricsFlip {
             extra_seed += 1;
         }
 
-        let mut options: Vec<String> = Vec::new(&env);
+        let mut options: Vec<String> = Vec::new(env);
         options.push_back(card.title.clone());
         for answer in false_answers.iter() {
             options.push_back(answer.clone());
         }
 
-        let shuffled = Self::shuffle_strings(&env, options, seed);
+        let shuffled = Self::shuffle_strings(env, options, seed);
 
         QuestionCard {
             lyric: card.lyrics.clone(),
             timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Title,
+            option_one: shuffled.get(0).unwrap(),
+            option_two: shuffled.get(1).unwrap(),
+            option_three: shuffled.get(2).unwrap(),
+            option_four: shuffled.get(3).unwrap(),
+        }
+    }
+
+    fn build_artist_question(env: &Env, card: Card, seed: u64, cards_count: u64) -> QuestionCard {
+        let random_ids = Self::get_random_numbers(env, seed, 10, cards_count, false);
+
+        let mut false_answers: Vec<String> = Vec::new(env);
+        for id in random_ids.iter() {
+            if false_answers.len() >= 3 {
+                break;
+            }
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
+            }
+        }
+
+        let mut extra_seed = seed + 1;
+        while false_answers.len() < 3 {
+            let ids = Self::get_random_numbers(env, extra_seed, 1, cards_count, false);
+            let id = ids.get(0).unwrap();
+            let candidate = Self::get_card(env.clone(), id);
+            if candidate.artist != card.artist
+                && !Self::contains_string(&false_answers, &candidate.artist)
+            {
+                false_answers.push_back(candidate.artist.clone());
+            }
+            extra_seed += 1;
+        }
+
+        let mut options: Vec<String> = Vec::new(env);
+        options.push_back(card.artist.clone());
+        for answer in false_answers.iter() {
+            options.push_back(answer.clone());
+        }
+
+        let shuffled = Self::shuffle_strings(env, options, seed);
+
+        QuestionCard {
+            lyric: card.lyrics.clone(),
+            timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Artist,
+            option_one: shuffled.get(0).unwrap(),
+            option_two: shuffled.get(1).unwrap(),
+            option_three: shuffled.get(2).unwrap(),
+            option_four: shuffled.get(3).unwrap(),
+        }
+    }
+
+    /// Year distractors: pick 6 random offsets in the range [-5, +5] \ {0},
+    /// deduplicate, and take the first 3. Year options are stored as their
+    /// decimal string representation so they fit into the same `Vec<String>`
+    /// shuffle as Title and Artist questions.
+    fn build_year_question(env: &Env, card: Card, seed: u64) -> QuestionCard {
+        // Generate offsets deterministically from the seed.
+        let offsets: [i64; 10] = [1, -1, 2, -2, 3, -3, 4, -4, 5, -5];
+        let mut current_seed = seed;
+        // Fisher-Yates shuffle of the offsets array using the LCG.
+        let mut shuffled_offsets = offsets;
+        let mut j = 10usize;
+        while j > 1 {
+            j -= 1;
+            current_seed =
+                current_seed.wrapping_mul(1664525).wrapping_add(1013904223) % 0xFFFF_FFFFu64;
+            let rand_idx = (current_seed % (j as u64 + 1)) as usize;
+            shuffled_offsets.swap(j, rand_idx);
+        }
+
+        let correct_year = card.year as i64;
+        let mut false_years: Vec<String> = Vec::new(env);
+        for &offset in shuffled_offsets.iter() {
+            if false_years.len() >= 3 {
+                break;
+            }
+            let candidate_year = correct_year + offset;
+            if candidate_year > 0 {
+                let year_str = Self::u64_to_string(env, candidate_year as u64);
+                if !Self::contains_string(&false_years, &year_str) {
+                    false_years.push_back(year_str);
+                }
+            }
+        }
+
+        let correct_str = Self::u64_to_string(env, card.year);
+        let mut options: Vec<String> = Vec::new(env);
+        options.push_back(correct_str);
+        for y in false_years.iter() {
+            options.push_back(y.clone());
+        }
+
+        let shuffled = Self::shuffle_strings(env, options, seed);
+
+        QuestionCard {
+            lyric: card.lyrics.clone(),
+            timestamp: env.ledger().timestamp(),
+            kind: QuestionKind::Year,
             option_one: shuffled.get(0).unwrap(),
             option_two: shuffled.get(1).unwrap(),
             option_three: shuffled.get(2).unwrap(),
@@ -795,6 +909,31 @@ impl LyricsFlip {
         if !is_admin {
             panic_with_error!(env, Error::NotAuthorized);
         }
+    }
+
+    /// Converts a `u64` year value to its decimal string representation.
+    /// Soroban's `no_std` environment has no format!/write! macros, so we
+    /// build the string manually by repeated division.
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+        // Collect digits in reverse.
+        let mut digits: [u8; 20] = [0u8; 20];
+        let mut len = 0usize;
+        while n > 0 {
+            digits[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
+        }
+        // Reverse into a fixed-size array and build a `&str`.
+        let mut buf: [u8; 20] = [0u8; 20];
+        for i in 0..len {
+            buf[i] = digits[len - 1 - i];
+        }
+        // SAFETY: all bytes are ASCII digits.
+        let s = core::str::from_utf8(&buf[..len]).unwrap_or("0");
+        String::from_str(env, s)
     }
 
     fn contains_string(v: &Vec<String>, target: &String) -> bool {
