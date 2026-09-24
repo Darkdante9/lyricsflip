@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Ported from `onchain/src/utils/types.cairo`. `felt252`/`ByteArray` fields
 /// become `String`; Starknet's `u8` fields become `u32` since Soroban has no
@@ -117,6 +117,16 @@ pub enum Answer {
     Title(String),
 }
 
+/// Position of a card in the global, genre, artist and year indexes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardPos {
+    pub all: u32,
+    pub genre: u32,
+    pub artist: u32,
+    pub year: u32,
+}
+
 /// Mirrors Cairo's single `ADMIN_ROLE` selector. Kept as an enum (instead of
 /// dropping the parameter entirely) so `set_role`/`is_admin` keep the same
 /// call shape as the original `ILyricsFlip` interface.
@@ -137,9 +147,22 @@ pub enum DataKey {
     CardsCount,
     CardsPerRound,
     Card(u64),
-    GenreCards(Genre),
-    ArtistCards(String),
-    YearCards(u64),
+    /// Last card id handed out. Ids are never reused, so this differs from
+    /// `CardsCount` (the number of live cards) once cards are removed.
+    LastCardId,
+    /// sha256(title, 0x00, artist) -> card id. Rejects duplicate cards.
+    CardKey(BytesN<32>),
+    /// Where a card sits in each of the index lists below (for O(1) removal).
+    CardPos(u64),
+    /// Indexes are stored as a count plus one entry per item, so adding a
+    /// card costs the same no matter how large the index already is.
+    CardAt(u32),
+    GenreCardCount(Genre),
+    GenreCardAt((Genre, u32)),
+    ArtistCardCount(String),
+    ArtistCardAt((String, u32)),
+    YearCardCount(u64),
+    YearCardAt((u64, u32)),
     Round(u64),
     RoundPlayers(u64),
     RoundCards(u64),
