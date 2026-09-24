@@ -539,3 +539,8 @@ Design references: [Figma](https://www.figma.com/design/6phOWkHKQgLRhRwmBBQDXB/L
 ## Related repositories
 
 📱 **Mobile app:** as part of the move to a multi-repo architecture, the LyricsFlip mobile app is being migrated to its own repository: [LyricsFlip Mobile](https://github.com/songifi/lyricsflip_mobile). This keeps mobile-specific code isolated and easier to maintain.
+
+## Handsoff notes
+
+<!-- handsoff-issue-487 -->
+- #487: LF-070 · Fix misspelled file and component names
