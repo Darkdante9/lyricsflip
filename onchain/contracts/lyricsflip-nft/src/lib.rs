@@ -64,7 +64,7 @@ fn bump_instance(env: &Env) {
 }
 
 #[inline]
-fn bump_persistent<K: soroban_sdk::TryIntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
+fn bump_persistent<K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>>(env: &Env, key: &K) {
     env.storage()
         .persistent()
         .extend_ttl(key, LIFETIME_THRESHOLD, BUMP_AMOUNT);

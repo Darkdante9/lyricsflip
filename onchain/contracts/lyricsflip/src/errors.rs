@@ -29,5 +29,6 @@ pub enum Error {
     LimitMustBeGreaterThanZero = 16,
     RoundNotReady = 18,
     RoundAlreadyFinalized = 19,
+    NotEnoughDistinctCards = 20,
     NonExistingCard = 17,
 }

@@ -26,6 +26,7 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   15: { name: 'AmountExceedsLimit', message: 'Not enough cards to build a round.' },
   16: { name: 'LimitMustBeGreaterThanZero', message: 'No cards have been added yet.' },
   17: { name: 'NonExistingCard', message: 'That card does not exist.' },
+  20: { name: 'NotEnoughDistinctCards', message: 'Not enough distinct answers to build a question card.' },
 };
 
 export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {
