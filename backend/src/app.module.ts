@@ -12,6 +12,7 @@ import { NotificationModule } from './notification/notification.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { AccessTokenGuard } from './auth/guard/access-token/access-token.guard';
+import { CustomThrottlerGuard } from './auth/guard/throttler.guard';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule } from './config/config.module';
 import { GlobalInterceptor } from './interceptors/global.interceptor';
@@ -93,6 +94,10 @@ import { StateRecoveryModule } from './state-recovery/state-recovery.module';
     {
       provide: APP_GUARD,
       useClass: AccessTokenGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: CustomThrottlerGuard,
     },
     {
       provide: APP_INTERCEPTOR,
