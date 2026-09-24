@@ -544,3 +544,5 @@ Design references: [Figma](https://www.figma.com/design/6phOWkHKQgLRhRwmBBQDXB/L
 
 <!-- handsoff-issue-487 -->
 - #487: LF-070 · Fix misspelled file and component names
+<!-- handsoff-issue-485 -->
+- #485: LF-068 · Add `frontend/.env.example`
