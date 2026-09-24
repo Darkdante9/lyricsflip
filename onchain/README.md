@@ -126,6 +126,54 @@ environment variables (see `frontend/src/lib/stellar/stellarConfig.ts`).
 Both paginated views clamp `limit` to `MAX_PAGE_LIMIT` (50) and return an
 empty list once `start` is past the end.
 
+## TTL policy (LF-012)
+
+Soroban persistent and instance storage entries are **archived** when their
+time-to-live (TTL) expires; archived entries become unreadable until an
+explicit restore transaction is sent. To keep active game data available on
+testnet and mainnet, both contracts extend TTLs on every significant read or
+write.
+
+### Constants (both contracts)
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `DAY_IN_LEDGERS` | 17 280 | Approximate ledger count per day (≈ 5 s/ledger on mainnet) |
+| `BUMP_AMOUNT` | `30 × DAY_IN_LEDGERS` | Target TTL set on each extension (~30 days) |
+| `LIFETIME_THRESHOLD` | `7 × DAY_IN_LEDGERS` | Only extend when remaining TTL falls below this (~7 days) |
+
+### What gets bumped
+
+**Instance storage** (owner, admin flags, counters, config) is bumped in every
+public entry point that reads or writes it — constructors, admin mutations
+(`add_card`, `set_cards_per_round`, `set_role`), and read-only views
+(`get_cards_count`, `get_round_count`, `get_cards_per_round`, `is_admin`).
+
+**Persistent storage** is bumped per-key on write, and on read for the
+following hot keys:
+
+| Key | Bumped on |
+| --- | --- |
+| `Card(id)` | `add_card` (write), `get_card` (read) |
+| `GenreCards / ArtistCards / YearCards` | `add_card` (write), `get_cards_of_*` (read) |
+| `Round(id)` | every write (`create_round`, `start_round`, `next_card`, …) and every read (`read_round`) |
+| `RoundPlayers / RoundCards` | write and read helpers |
+| `RoundReady / RoundReadyCount` | `start_round` write |
+| `RoundScores / RoundAnswerTimes` | `submit_answer` write |
+| `RoundCardStartedAt` | `next_card` write |
+| `RoundPlayerAnswered` | `submit_answer` write |
+| `RoundFinalized` | `finalize_round` write |
+| `OpenRounds` | `create_round` / `start_round` write |
+| `PlayerStats` | `start_round` / `submit_answer` / `finalize_round` write, `get_player_stat` read |
+| `TokenOwner(id)` *(NFT)* | `mint` write, `owner_of` read |
+
+### Survival tests
+
+`test::ttl_survival_game_entries_survive_ledger_advance` advances the ledger
+sequence past the default TTL and verifies that entries touched during gameplay
+(cards, rounds, player stats) are still readable. The equivalent NFT test
+`test::ttl_survival_token_owner_survives_ledger_advance` covers `TokenOwner`.
+
 ## Error codes
 
 Contract errors reach clients as `Error(Contract, #<code>)`, and the frontend

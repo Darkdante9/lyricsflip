@@ -16,6 +16,15 @@ use soroban_sdk::{
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
+//! Representative behavior-coverage tests for the LyricsFlip game contract.
+//! Covers round lifecycle, card queries, answer submission, access control,
+//! LF-011 (O(limit) random selection), and LF-012 (TTL survival).
+
+use crate::{Answer, Card, Error, Genre, LyricsFlip, LyricsFlipClient, Role, MAX_PAGE_LIMIT};
+use soroban_sdk::{
+    testutils::{Address as _, Events, Ledger as _},
+    xdr, Address, Env, Map, String,
+};
 
 fn setup<'a>() -> (Env, LyricsFlipClient<'a>, Address) {
     let env = Env::default();
@@ -1094,4 +1103,118 @@ fn error_codes_are_stable() {
     for (variant, code) in expected {
         assert_eq!(variant as u32, code, "{:?} was renumbered", variant);
     }
+}
+
+// ---------------------------------------------------------------------------
+// LF-011 – partial Fisher-Yates is O(limit), not O(coupon-collector)
+// ---------------------------------------------------------------------------
+
+/// Confirms that `get_random_numbers(amount=50, limit=50)` — the worst-case
+/// scenario that caused the coupon-collector blowup — now runs in a fixed
+/// number of iterations. We check this indirectly: seed the contract with 50
+/// cards, call `get_cards_of_genre` (which internally calls
+/// `get_random_numbers(amount=50, limit=50)`), and assert the result is
+/// exactly 50 distinct card IDs with no panics or budget exhaustion.
+#[test]
+fn get_random_numbers_worst_case_amount_equals_limit() {
+    let (env, client, owner) = setup();
+
+    // Add 50 distinct cards (all Pop genre).
+    for i in 0..50u64 {
+        let title = soroban_sdk::String::from_str(&env, "T");
+        // Unique titles via seeded shuffle are not required here; we only care
+        // that the function returns 50 results without panicking.
+        let card = Card {
+            card_id: 0,
+            genre: Genre::Pop,
+            artist: soroban_sdk::String::from_str(&env, "A"),
+            title,
+            year: 2000 + i,
+            lyrics: soroban_sdk::String::from_str(&env, "lyric"),
+        };
+        client.add_card(&owner, &card);
+    }
+    client.set_cards_per_round(&owner, &50);
+
+    // This must complete without panicking (no infinite loop).
+    let cards = client.get_cards_of_genre(&Genre::Pop, &12345u64);
+    assert_eq!(
+        cards.len(),
+        50,
+        "expected exactly 50 cards back when amount == limit == 50"
+    );
+}
+
+/// Verifies that `get_random_numbers` returns the requested `amount` without
+/// panicking across a variety of (amount, limit) pairs and seeds.
+#[test]
+fn get_random_numbers_returns_correct_count_for_various_inputs() {
+    let (env, client, owner) = setup();
+    for i in 0..20u64 {
+        client.add_card(
+            &owner,
+            &sample_card(&env, Genre::Jazz, "Artist", "Title", 1970 + i),
+        );
+    }
+
+    for amount in [1u32, 5, 10, 15, 20] {
+        client.set_cards_per_round(&owner, &amount);
+        let cards = client.get_cards_of_genre(&Genre::Jazz, &(amount as u64 * 7 + 3));
+        assert_eq!(
+            cards.len(),
+            amount,
+            "expected {amount} cards, got {}",
+            cards.len()
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LF-012 – persistent storage survives a ledger advance past default TTL
+// ---------------------------------------------------------------------------
+
+/// After gameplay entries (cards, round, player stats) are written and the
+/// ledger sequence advances well past Soroban's default minimum TTL, the
+/// entries are still readable because `extend_ttl` was called on write.
+#[test]
+fn ttl_survival_game_entries_survive_ledger_advance() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 3);
+    client.set_cards_per_round(&owner, &2);
+
+    let round_id = client.create_round(&owner, &Some(Genre::Pop), &77u64);
+    client.start_round(&owner, &round_id);
+
+    let card = client.next_card(&round_id);
+    assert!(client.submit_answer(&owner, &round_id, &Answer::Title(card.title.clone())));
+
+    // Advance ledger sequence far beyond the Soroban default minimum TTL
+    // (4 096 ledgers). If entries were never extended they would be
+    // unreadable at this point.
+    env.ledger().set_sequence_number(100_000);
+
+    // All entries written during gameplay must still be readable.
+    let _round = client.get_round(&round_id);
+    let _card_back = client.get_card(&1);
+    let stats = client.get_player_stat(&owner);
+    assert_eq!(
+        stats.total_rounds, 1,
+        "player stats should still be readable after ledger advance"
+    );
+    assert_eq!(stats.current_streak, 1);
+}
+
+/// Cards added before a large ledger advance are still readable afterwards.
+#[test]
+fn ttl_survival_cards_survive_ledger_advance() {
+    let (env, client, owner) = setup();
+    seed_cards(&env, &client, &owner, 5);
+    client.set_cards_per_round(&owner, &3);
+
+    env.ledger().set_sequence_number(200_000);
+
+    // Cards and genre index should still be accessible.
+    let _card = client.get_card(&1);
+    let cards = client.get_cards_of_genre(&Genre::Pop, &999u64);
+    assert_eq!(cards.len(), 3);
 }
