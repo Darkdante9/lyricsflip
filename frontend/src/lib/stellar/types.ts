@@ -75,7 +75,12 @@ export interface Round {
   is_completed: boolean;
   end_time: bigint;
   next_card_index: number;
+  is_cancelled: boolean;
 }
+
+/** Mirrors the contract's `Milestone` enum (encoded as a plain `u32`). */
+export const MILESTONES = { FirstWin: 0, Streak5: 1, TenWins: 2 } as const;
+export type Milestone = (typeof MILESTONES)[keyof typeof MILESTONES];
 
 /** Raw shape returned by the contract, before `genreFromWire` is applied. */
 export interface WireRound extends Omit<Round, 'genre'> {
@@ -92,11 +97,36 @@ export interface PlayerStats {
 export interface QuestionCard {
   lyric: string;
   timestamp: bigint;
+  /** Which attribute the options represent. Matches `QuestionKind` in `onchain/contracts/lyricsflip/src/types.rs`. */
+  kind: QuestionKind;
   option_one: string;
   option_two: string;
   option_three: string;
   option_four: string;
 }
+
+/**
+ * Mirrors `QuestionKind` in `onchain/contracts/lyricsflip/src/types.rs`.
+ * Ordering must match the explicit discriminants there.
+ * Keep `QUESTION_KIND_VALUES` below in sync.
+ */
+export type QuestionKind = 'Title' | 'Artist' | 'Year';
+
+/** Ordering must match the explicit discriminants on `QuestionKind` in `onchain/contracts/lyricsflip/src/types.rs`. */
+export const QUESTION_KIND_VALUES: readonly QuestionKind[] = ['Title', 'Artist', 'Year'];
+
+/** Converts a friendly `QuestionKind` into the `u32` the contract expects. */
+export const questionKindToWire = (kind: QuestionKind): number =>
+  QUESTION_KIND_VALUES.indexOf(kind);
+
+/** Converts a `u32` discriminant back into a friendly `QuestionKind`. */
+export const questionKindFromWire = (value: number): QuestionKind => {
+  const kind = QUESTION_KIND_VALUES[value];
+  if (!kind) {
+    throw new Error(`Unknown QuestionKind discriminant: ${value}`);
+  }
+  return kind;
+};
 
 export type Answer =
   | { tag: 'Artist'; values: [string] }

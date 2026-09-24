@@ -1,6 +1,8 @@
 use crate::types::{Genre, Role};
 use soroban_sdk::{contractevent, Address, Map, Vec};
 
+use crate::types::{Milestone, Role};
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoundCreated {
@@ -57,6 +59,12 @@ pub struct CardAdded {
     pub card_id: u64,
     #[topic]
     pub genre: Genre,
+pub struct RoundLeft {
+    #[topic]
+    pub round_id: u64,
+    #[topic]
+    pub player: Address,
+    pub refunded: i128,
 }
 
 #[contractevent]
@@ -66,6 +74,14 @@ pub struct CardUpdated {
     pub card_id: u64,
     #[topic]
     pub genre: Genre,
+pub struct RoundCancelled {
+    #[topic]
+    pub round_id: u64,
+    #[topic]
+    pub cancelled_by: Address,
+    /// Players whose wager was refunded (everyone still in the round).
+    pub refunded_players: Vec<Address>,
+    pub refund_per_player: i128,
 }
 
 #[contractevent]
@@ -73,6 +89,11 @@ pub struct CardUpdated {
 pub struct CardRemoved {
     #[topic]
     pub card_id: u64,
+pub struct RewardClaimed {
+    #[topic]
+    pub player: Address,
+    pub milestone: Milestone,
+    pub token_id: u128,
 }
 
 #[contractevent]
@@ -82,6 +103,11 @@ pub struct CardDrawn {
     pub round_id: u64,
     pub index: u32,
     pub card_id: u64,
+pub struct RoleUpdated {
+    #[topic]
+    pub address: Address,
+    pub role: Role,
+    pub enabled: bool,
 }
 
 #[contractevent]
@@ -92,6 +118,11 @@ pub struct AnswerSubmitted {
     #[topic]
     pub player: Address,
     pub correct: bool,
+pub struct OwnershipTransferStarted {
+    #[topic]
+    pub owner: Address,
+    #[topic]
+    pub pending_owner: Address,
 }
 
 #[contractevent]
@@ -107,4 +138,9 @@ pub struct RoleUpdated {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CardsPerRoundUpdated {
     pub value: u32,
+pub struct OwnershipTransferred {
+    #[topic]
+    pub old_owner: Address,
+    #[topic]
+    pub new_owner: Address,
 }

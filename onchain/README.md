@@ -37,6 +37,112 @@ Winner selection follows the LF-005 rule:
 
 `PlayerStats.rounds_won` increments by exactly `1` for every winner when a round is finalized; non-winners and zero-score rounds do not change it. `RoundCompleted { round_id, winners, scores }` emits the finalized round id, the winning addresses, and the final score map for every player in the round.
 
+When a round is finalized it is marked `is_completed`, and `end_time` is set
+to the finalization time, or kept at the deadline if the round timed out.
+
+## Round lifecycle, limits and timing
+
+- **Player cap:** `join_round` fails with `RoundFull` once a round has
+  `get_max_players()` players (default `8`; the owner can change it with
+  `set_max_players(caller, value)`, minimum 2).
+- **Round deadline:** a round's `end_time` is `start_time + 300s`. After it,
+  `submit_answer` fails with `RoundCompleted`, and the round can be finalized.
+- **Card answer window:** players have `CARD_ANSWER_WINDOW_SECONDS` (15s) after
+  `next_card` to answer. **Late answers are accepted but scored as wrong**
+  (they break the streak), so the player still counts as having answered and
+  the round can finalize early.
+- **Leaving:** `leave_round(caller, round_id)` removes a non-admin player
+  before the round starts, clears their ready flag, refunds their wager and
+  emits `RoundLeft { round_id, player, refunded }`.
+- **Cancelling:** `cancel_round(caller, round_id)` works before start. The
+  round admin can call it at any time; anyone else can call it once the lobby
+  has been open for `LOBBY_TIMEOUT_SECONDS` (600s). It sets `is_cancelled`,
+  drops the round from `get_open_rounds`, refunds every player and emits
+  `RoundCancelled { round_id, cancelled_by, refunded_players, refund_per_player }`.
+  A cancelled round can't be joined, started, or finalized (`RoundCancelled`).
+
+Wagers are not escrowed yet (LF-013), so refunds currently report
+`round.wager_amount` without moving tokens. The token transfer goes into
+`refund_wager` once escrow lands.
+
+## NFT rewards
+
+The game contract is the NFT contract's minter. The owner registers the NFT
+contract with `set_nft_contract(caller, nft_contract)`; players then call
+`claim_reward(caller, milestone)`, and the game contract mints through a
+cross-contract call to `mint`. Each milestone can be claimed once per player
+(`MilestoneAlreadyClaimed`); `is_milestone_claimed(player, milestone)` reports
+whether it has been claimed.
+
+| Milestone | Value | Requirement |
+| --- | --- | --- |
+| `FirstWin` | 0 | `rounds_won >= 1` |
+| `Streak5` | 1 | `max_streak >= 5` |
+| `TenWins` | 2 | `rounds_won >= 10` |
+
+### `lyricsflip-nft` interface
+
+The contract follows the [SEP-0050](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0050.md)
+non-fungible interface, with method names and events matching OpenZeppelin's
+`stellar-non-fungible`. It stays hand-written rather than depending on that
+library, to avoid tying the workspace's `soroban-sdk` version to the
+library's.
+
+| Function | Description |
+| --- | --- |
+| `mint(caller, recipient) -> u128` | Minter-only; mints the next token id |
+| `owner_of(token_id) -> Address` | Owner of a token |
+| `balance(owner) -> u32` | Number of tokens held by `owner` |
+| `transfer(from, to, token_id)` | Owner transfers a token (auth: `from`) |
+| `transfer_from(spender, from, to, token_id)` | Approved spender or operator transfers (auth: `spender`) |
+| `approve(approver, approved, token_id, live_until_ledger)` | Owner or operator approves one spender for a token; `0` revokes |
+| `approve_for_all(owner, operator, live_until_ledger)` | Approves an operator for all of `owner`'s tokens; `0` revokes |
+| `get_approved(token_id) -> Option<Address>` | Current, unexpired token approval |
+| `is_approved_for_all(owner, operator) -> bool` | Whether `operator` is an unexpired operator |
+| `token_name()`, `token_symbol()`, `base_uri()`, `token_count()` | Metadata |
+| `token_uri(token_id) -> String` | `base_uri` followed by the token id; `TokenDoesNotExist` for unminted tokens |
+| `set_base_uri(caller, base_uri)` | Owner-only; at most 200 bytes |
+| `set_minter(caller, new_minter)` | Owner-only; the old minter can no longer mint |
+| `owner()`, `minter()`, `pending_owner()` | Administration views |
+
+Per-token metadata follows the JSON template in `metadata/template.json`, served
+at `<base_uri><token_id>`.
+
+Events: `NftMinted`, `Transfer { from, to, token_id }`,
+`Approve { approver, token_id, approved, live_until_ledger }` and
+`ApproveForAll { owner, operator, live_until_ledger }`, `MinterUpdated`. A
+transfer clears the token's approval.
+
+## Ownership, roles and upgrades
+
+Both contracts support a two-step ownership transfer: the owner calls
+`transfer_ownership(caller, new_owner)`, then the new owner calls
+`accept_ownership(caller)` (`OwnershipTransferStarted` / `OwnershipTransferred`
+events; `owner()` and `pending_owner()` views). On `lyricsflip`, the new owner
+is also granted the admin role, and `set_role` is owner-only regardless of the
+owner's own admin flag, so the owner cannot lock themselves out. `set_role`
+emits `RoleUpdated { address, role, enabled }`.
+
+Both contracts expose `version() -> u32` and an owner-only
+`upgrade(caller, new_wasm_hash)` that replaces the code in place and keeps all
+storage (cards, stats, NFTs). Bump `VERSION` in the contract on each release,
+then:
+
+```bash
+cargo build --target wasm32v1-none --release
+HASH=$(stellar contract upload \
+  --wasm target/wasm32v1-none/release/lyricsflip.wasm \
+  --source <OWNER_IDENTITY> --network testnet)
+stellar contract invoke --id <LYRICSFLIP_CONTRACT_ID> \
+  --source <OWNER_IDENTITY> --network testnet \
+  -- upgrade --caller <OWNER_ADDRESS> --new_wasm_hash $HASH
+```
+
+A release that changes the layout of stored data must migrate it; there is no
+storage schema version key yet, so add one alongside the first such change.
+`fixtures/upgrade_v2.wasm` (built from `contracts/upgrade-fixture`) is the
+stand-in new code used by the upgrade tests.
+
 ## Build & test
 
 ```bash
@@ -51,7 +157,48 @@ target/wasm32v1-none/release/lyricsflip.wasm
 target/wasm32v1-none/release/lyricsflip_nft.wasm
 ```
 
-## Deploying (testnet example)
+## Deploy and seed (automated)
+
+Two helper scripts live in `scripts/` and cover the full set-up flow for a
+fresh testnet deployment.
+
+### Prerequisites
+
+1. Stellar CLI installed (`stellar`).
+2. A funded identity called `me` on the target network:
+
+   ```bash
+   stellar keys generate --global me --network testnet --fund
+   ```
+
+3. Rust with the `wasm32v1-none` target (see above).
+4. `jq` installed (required by `seed-cards.sh`).
+
+### `scripts/deploy.sh`
+
+Builds both WASMs, deploys them, wires the NFT minter to the game contract,
+sets `cards_per_round`, and writes the two contract IDs into
+`frontend/.env.local`.
+
+```bash
+cd onchain
+./scripts/deploy.sh testnet   # or mainnet / futurenet
+```
+
+### `scripts/seed-cards.sh`
+
+Reads `seed/cards.json` (≥ 5 cards per genre, using original and
+public-domain lyric snippets) and calls `add_card` for every entry.  Run
+after `deploy.sh` so the contract IDs are already in `frontend/.env.local`.
+
+```bash
+cd onchain
+./scripts/seed-cards.sh testnet
+```
+
+### Manual deployment (alternative)
+
+If you prefer to deploy by hand:
 
 ```bash
 stellar contract deploy \
@@ -135,6 +282,53 @@ fields.
 | `CardRemoved` | `remove_card` | `card_id: u64` | – |
 | `RoleUpdated` | `set_role` | `account: Address` | `role: Role`, `enabled: bool` |
 | `CardsPerRoundUpdated` | `set_cards_per_round` | – | `value: u32` |
+## TTL policy (LF-012)
+
+Soroban persistent and instance storage entries are **archived** when their
+time-to-live (TTL) expires; archived entries become unreadable until an
+explicit restore transaction is sent. To keep active game data available on
+testnet and mainnet, both contracts extend TTLs on every significant read or
+write.
+
+### Constants (both contracts)
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `DAY_IN_LEDGERS` | 17 280 | Approximate ledger count per day (≈ 5 s/ledger on mainnet) |
+| `BUMP_AMOUNT` | `30 × DAY_IN_LEDGERS` | Target TTL set on each extension (~30 days) |
+| `LIFETIME_THRESHOLD` | `7 × DAY_IN_LEDGERS` | Only extend when remaining TTL falls below this (~7 days) |
+
+### What gets bumped
+
+**Instance storage** (owner, admin flags, counters, config) is bumped in every
+public entry point that reads or writes it — constructors, admin mutations
+(`add_card`, `set_cards_per_round`, `set_role`), and read-only views
+(`get_cards_count`, `get_round_count`, `get_cards_per_round`, `is_admin`).
+
+**Persistent storage** is bumped per-key on write, and on read for the
+following hot keys:
+
+| Key | Bumped on |
+| --- | --- |
+| `Card(id)` | `add_card` (write), `get_card` (read) |
+| `GenreCards / ArtistCards / YearCards` | `add_card` (write), `get_cards_of_*` (read) |
+| `Round(id)` | every write (`create_round`, `start_round`, `next_card`, …) and every read (`read_round`) |
+| `RoundPlayers / RoundCards` | write and read helpers |
+| `RoundReady / RoundReadyCount` | `start_round` write |
+| `RoundScores / RoundAnswerTimes` | `submit_answer` write |
+| `RoundCardStartedAt` | `next_card` write |
+| `RoundPlayerAnswered` | `submit_answer` write |
+| `RoundFinalized` | `finalize_round` write |
+| `OpenRounds` | `create_round` / `start_round` write |
+| `PlayerStats` | `start_round` / `submit_answer` / `finalize_round` write, `get_player_stat` read |
+| `TokenOwner(id)` *(NFT)* | `mint` write, `owner_of` read |
+
+### Survival tests
+
+`test::ttl_survival_game_entries_survive_ledger_advance` advances the ledger
+sequence past the default TTL and verifies that entries touched during gameplay
+(cards, rounds, player stats) are still readable. The equivalent NFT test
+`test::ttl_survival_token_owner_survives_ledger_advance` covers `TokenOwner`.
 
 ## Error codes
 
@@ -176,6 +370,17 @@ Every variant is currently referenced by the contract. The ones marked
 | 30 | `LyricsTooLong` | Card `lyrics` exceed `MAX_LYRICS_LEN` bytes |
 | 31 | `DuplicateCard` | Another card already has this `title` + `artist` |
 | 32 | `BatchTooLarge` | `add_cards` got more than `MAX_CARDS_PER_BATCH` cards |
+| 18 | `RoundNotReady` | `finalize_round` before all answers are in or the deadline has passed |
+| 19 | `RoundAlreadyFinalized` | Round was already finalized |
+| 20 | `RoundCancelled` | Round was cancelled |
+| 21 | `RoundFull` | Round already has `max_players` players |
+| 22 | `InvalidMaxPlayers` | `set_max_players` was called with a value below 2 |
+| 23 | `NftContractNotSet` | `claim_reward` before the owner set the NFT contract |
+| 24 | `MilestoneNotReached` | Player's stats don't meet the milestone yet |
+| 25 | `MilestoneAlreadyClaimed` | Player already claimed that milestone |
+| 26 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
+| 18 | `RoundNotReady` | `finalize_round` called before all answers submitted and before the deadline |
+| 19 | `RoundAlreadyFinalized` | `finalize_round` called a second time on an already-finalized round |
 
 ### `lyricsflip-nft`
 
@@ -184,4 +389,10 @@ Every variant is currently referenced by the contract. The ones marked
 | 1 | `AlreadyInitialized` | Constructor ran on an already-initialized contract (*defensive*) |
 | 2 | `NotMinter` | Caller of `mint` is not the configured minter |
 | 3 | `TokenAlreadyExists` | Token id collision on mint (*defensive*) |
-| 4 | `TokenDoesNotExist` | `owner_of` was called for an unminted token |
+| 4 | `TokenDoesNotExist` | `owner_of` or `token_uri` was called for an unminted token |
+| 5 | `IncorrectOwner` | `from` does not own the token being transferred |
+| 6 | `InsufficientApproval` | Spender/approver is neither the owner nor approved |
+| 7 | `InvalidLiveUntilLedger` | Approval expiry is already in the past |
+| 8 | `NotOwner` | Caller of an owner-only function is not the owner |
+| 9 | `NotPendingOwner` | Caller of `accept_ownership` is not the pending owner |
+| 10 | `BaseUriTooLong` | `base_uri` is longer than 200 bytes |

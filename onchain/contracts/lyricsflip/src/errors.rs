@@ -38,4 +38,11 @@ pub enum Error {
     LyricsTooLong = 30,
     DuplicateCard = 31,
     BatchTooLarge = 32,
+    RoundCancelled = 20,
+    RoundFull = 21,
+    InvalidMaxPlayers = 22,
+    NftContractNotSet = 23,
+    MilestoneNotReached = 24,
+    MilestoneAlreadyClaimed = 25,
+    NotPendingOwner = 26,
 }
