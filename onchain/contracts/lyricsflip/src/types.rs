@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Ported from `onchain/src/utils/types.cairo`. `felt252`/`ByteArray` fields
 /// become `String`; Starknet's `u8` fields become `u32` since Soroban has no
@@ -69,6 +69,19 @@ pub struct Round {
     pub is_completed: bool,
     pub end_time: u64,
     pub next_card_index: u32,
+    pub is_cancelled: bool,
+}
+
+/// NFT reward milestones a player can claim once each via `claim_reward`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Milestone {
+    /// At least one round won.
+    FirstWin = 0,
+    /// A streak of at least 5 correct answers.
+    Streak5 = 1,
+    /// At least 10 rounds won.
+    TenWins = 2,
 }
 
 /// Specifies what the player is asked to identify in a `QuestionCard`.
@@ -104,6 +117,16 @@ pub enum Answer {
     Title(String),
 }
 
+/// Position of a card in the global, genre, artist and year indexes.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CardPos {
+    pub all: u32,
+    pub genre: u32,
+    pub artist: u32,
+    pub year: u32,
+}
+
 /// Mirrors Cairo's single `ADMIN_ROLE` selector. Kept as an enum (instead of
 /// dropping the parameter entirely) so `set_role`/`is_admin` keep the same
 /// call shape as the original `ILyricsFlip` interface.
@@ -117,14 +140,29 @@ pub enum Role {
 #[derive(Clone)]
 pub enum DataKey {
     Owner,
+    /// Nominated by `transfer_ownership`, pending `accept_ownership`.
+    PendingOwner,
     Admin(Address),
     RoundCount,
     CardsCount,
     CardsPerRound,
     Card(u64),
-    GenreCards(Genre),
-    ArtistCards(String),
-    YearCards(u64),
+    /// Last card id handed out. Ids are never reused, so this differs from
+    /// `CardsCount` (the number of live cards) once cards are removed.
+    LastCardId,
+    /// sha256(title, 0x00, artist) -> card id. Rejects duplicate cards.
+    CardKey(BytesN<32>),
+    /// Where a card sits in each of the index lists below (for O(1) removal).
+    CardPos(u64),
+    /// Indexes are stored as a count plus one entry per item, so adding a
+    /// card costs the same no matter how large the index already is.
+    CardAt(u32),
+    GenreCardCount(Genre),
+    GenreCardAt((Genre, u32)),
+    ArtistCardCount(String),
+    ArtistCardAt((String, u32)),
+    YearCardCount(u64),
+    YearCardAt((u64, u32)),
     Round(u64),
     RoundPlayers(u64),
     RoundCards(u64),
@@ -139,4 +177,12 @@ pub enum DataKey {
     /// Ids of rounds that have been created but not yet started, in creation
     /// order. Backs the multiplayer lobby's `get_open_rounds` view.
     OpenRounds,
+    /// Global cap on players per round (owner-configurable).
+    MaxPlayers,
+    /// Ledger timestamp at which a round was created; drives the lobby timeout.
+    RoundCreatedAt(u64),
+    /// Address of the `lyricsflip-nft` contract used to mint rewards.
+    NftContract,
+    /// Whether a player has already claimed a milestone reward.
+    MilestoneClaimed((Address, Milestone)),
 }

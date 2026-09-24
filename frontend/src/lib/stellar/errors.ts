@@ -27,6 +27,21 @@ export const LYRICSFLIP_ERRORS: Record<number, ContractErrorInfo> = {
   16: { name: 'LimitMustBeGreaterThanZero', message: 'No cards have been added yet.' },
   17: { name: 'NonExistingCard', message: 'That card does not exist.' },
   20: { name: 'NotEnoughDistinctCards', message: 'Not enough distinct answers to build a question card.' },
+  21: { name: 'RoundFull', message: 'That round is full.' },
+  26: { name: 'InvalidCardTitle', message: 'A card needs a title.' },
+  27: { name: 'InvalidCardArtist', message: 'A card needs an artist.' },
+  28: { name: 'InvalidCardLyrics', message: 'A card needs lyrics.' },
+  29: { name: 'InvalidCardYear', message: 'The card year must be between 1900 and this year.' },
+  30: { name: 'LyricsTooLong', message: 'The lyrics are too long (max 1000 bytes).' },
+  31: { name: 'DuplicateCard', message: 'A card with that title and artist already exists.' },
+  32: { name: 'BatchTooLarge', message: 'Too many cards in one batch (max 20).' },
+  20: { name: 'RoundCancelled', message: 'That round was cancelled.' },
+  21: { name: 'RoundFull', message: 'That round is full.' },
+  22: { name: 'InvalidMaxPlayers', message: 'A round needs room for at least 2 players.' },
+  23: { name: 'NftContractNotSet', message: 'NFT rewards are not configured yet.' },
+  24: { name: 'MilestoneNotReached', message: 'You have not reached that milestone yet.' },
+  25: { name: 'MilestoneAlreadyClaimed', message: 'You already claimed that reward.' },
+  26: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
 };
 
 export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {
@@ -34,6 +49,12 @@ export const LYRICSFLIP_NFT_ERRORS: Record<number, ContractErrorInfo> = {
   2: { name: 'NotMinter', message: 'Only the minter can mint rewards.' },
   3: { name: 'TokenAlreadyExists', message: 'That token has already been minted.' },
   4: { name: 'TokenDoesNotExist', message: 'That token does not exist.' },
+  5: { name: 'IncorrectOwner', message: 'That token is not owned by this account.' },
+  6: { name: 'InsufficientApproval', message: 'You are not approved to manage that token.' },
+  7: { name: 'InvalidLiveUntilLedger', message: 'That approval expiry is already in the past.' },
+  8: { name: 'NotOwner', message: 'Only the contract owner can do that.' },
+  9: { name: 'NotPendingOwner', message: 'You are not the pending owner of this contract.' },
+  10: { name: 'BaseUriTooLong', message: 'That base URI is too long.' },
 };
 
 /**
